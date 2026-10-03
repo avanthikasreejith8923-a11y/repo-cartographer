@@ -22,16 +22,21 @@ graph TD
 
 ## 🚀 Phase Checklist
 
-- [x] **Phase 1: Foundation + GitHub OAuth** (Current)
+- [x] **Phase 1: Foundation + GitHub OAuth** (Complete)
   - Monorepo structure with FastAPI, React Vite TS, and Docker Compose
   - PostgreSQL 16 with `pgvector` extension and initial Alembic migration
   - Secure GitHub OAuth 2.0 web application flow with Fernet token encryption at rest
   - Signed CSRF state verification and `httpOnly`, `SameSite=Lax` session management
   - Health check endpoint (`/health`) validating DB and Redis connectivity
   - Pytest async suite with Respx mocks and Ruff linting in GitHub Actions CI
-- [ ] **Phase 2: Repository Ingestion & ARQ Worker**
-  - Redis-backed ARQ worker pool for background task processing
-  - GitHub repo connection, commit history parsing, PR and issue metadata ingestion
+- [x] **Phase 2: Repository Import + Async GitHub Sync** (Complete)
+  - Async GitHub API client with RFC 5988 pagination, rate limit tracking, and exponential backoff retry
+  - Data models (`repositories`, `commits`, `pull_requests`, `issues`, `sync_jobs`) with Alembic migration `0002_ingestion_tables`
+  - ARQ background worker integration (`app.worker:WorkerSettings`) with Redis job queue
+  - 4-stage ingestion pipeline: Metadata -> Commits -> Pull Requests -> Issues (excluding PRs)
+  - Idempotent PostgreSQL upserts (`INSERT ... ON CONFLICT DO UPDATE`)
+  - Full REST API suite for repository discovery, import, status polling, and commit/PR/issue listing with filters
+  - Modern React frontend with modal repo importer, real-time polling sync status cards, and tabbed repo inspection
 - [ ] **Phase 3: AST Parsing & Codebase Graph Construction**
   - AST analysis and symbol relationship extraction (classes, functions, imports)
   - Codebase dependency and knowledge graph generation
@@ -77,6 +82,33 @@ Copy `.env.example` to `.env` and configure the following variables:
 | `GITHUB_CLIENT_ID` | string | *required* | GitHub OAuth App Client ID |
 | `GITHUB_CLIENT_SECRET` | string | *required* | GitHub OAuth App Client Secret |
 | `GITHUB_REDIRECT_URI` | string | `http://localhost:8000/auth/github/callback` | OAuth redirect URI configured in GitHub |
+| `SYNC_MAX_COMMITS` | integer | `500` | Max commits to fetch during repository sync |
+| `SYNC_MAX_PRS` | integer | `200` | Max pull requests to fetch during sync |
+| `SYNC_MAX_ISSUES` | integer | `200` | Max issues to fetch during sync |
+| `SYNC_STATS_COMMITS_LIMIT` | integer | `25` | Number of recent commits to fetch per-item line stats |
+| `SYNC_STATS_PRS_LIMIT` | integer | `25` | Number of recent PRs to fetch per-item line stats |
+
+---
+
+## 📡 API Endpoints (Phase 2)
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/health` | Service health status (DB + Redis) |
+| `GET` | `/auth/github/login` | Initiate GitHub OAuth flow |
+| `GET` | `/auth/github/callback` | OAuth callback and token exchange |
+| `GET` | `/auth/me` | Current authenticated user profile |
+| `POST` | `/auth/logout` | Clear session cookie |
+| `GET` | `/repos/available` | List user repositories on GitHub available for import |
+| `POST` | `/repos/import` | Import a repository and enqueue background sync job |
+| `GET` | `/repos` | List all repositories imported by the current user |
+| `GET` | `/repos/{id}` | Get repository details (enforces ownership) |
+| `DELETE`| `/repos/{id}` | Delete repository and all cascading records |
+| `POST` | `/repos/{id}/sync` | Trigger asynchronous re-sync |
+| `GET` | `/repos/{id}/sync-status`| Get active or latest sync job progress and stage |
+| `GET` | `/repos/{id}/commits` | List ingested commits (filter by author, date range) |
+| `GET` | `/repos/{id}/pulls` | List ingested PRs (filter by state: `open`\|`closed`\|`all`, author) |
+| `GET` | `/repos/{id}/issues` | List ingested issues excluding PRs (filter by state, author) |
 
 ---
 
@@ -129,6 +161,9 @@ alembic upgrade head
 
 # Start development server
 uvicorn app.main:app --reload --port 8000
+
+# Start ARQ background worker (in separate terminal)
+arq app.worker.WorkerSettings
 ```
 
 ### Frontend
