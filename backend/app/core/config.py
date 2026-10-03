@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     GITHUB_CLIENT_SECRET: str = ""
     GITHUB_REDIRECT_URI: str = "http://localhost:8000/auth/github/callback"
 
+    # Ingestion & Sync Job Limits
+    SYNC_MAX_COMMITS: int = 500
+    SYNC_MAX_PRS: int = 200
+    SYNC_MAX_ISSUES: int = 500
+    SYNC_STATS_COMMITS_LIMIT: int = 100
+    SYNC_STATS_PRS_LIMIT: int = 50
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: str | list[str]) -> list[str]:
