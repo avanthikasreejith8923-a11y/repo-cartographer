@@ -46,9 +46,9 @@ class RepoResponse(BaseModel):
     github_id: int
     full_name: str
     description: str | None = None
-    default_branch: str
+    default_branch: str = "main"
     language: str | None = None
-    is_private: bool
+    is_private: bool = False
     status: str
     last_synced_at: datetime | None = None
     sync_error: str | None = None

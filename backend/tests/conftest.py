@@ -208,6 +208,10 @@ class InMemoryAsyncSession:
                 instance.created_at = now
             if not instance.updated_at:
                 instance.updated_at = now
+            if not getattr(instance, "default_branch", None):
+                instance.default_branch = "main"
+            if getattr(instance, "is_private", None) is None:
+                instance.is_private = False
             self.repos_by_id[instance.id] = instance
         elif isinstance(instance, SyncJob):
             if not instance.id:

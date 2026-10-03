@@ -1,6 +1,8 @@
 """API routes for repository discovery, import, and management."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +15,7 @@ from app.schemas.repository import (
     AvailableRepoResponse,
     RepoImportRequest,
     RepoImportResponse,
+    RepoResponse,
 )
 from app.services.github_client import GitHubAPIError, GitHubClient
 from app.services.queue import enqueue_sync_job
@@ -144,3 +147,76 @@ async def import_repository(
         repository=repo,  # type: ignore[arg-type]
         sync_job=sync_job,  # type: ignore[arg-type]
     )
+
+
+@router.get(
+    "",
+    response_model=list[RepoResponse],
+    summary="List all repositories imported by the current user",
+)
+async def list_repositories(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[RepoResponse]:
+    """Retrieve all repositories belonging to the authenticated user."""
+    stmt = (
+        select(Repository)
+        .where(Repository.user_id == current_user.id)
+        .order_by(Repository.created_at.desc())
+    )
+    result = await db.execute(stmt)
+    repos = result.scalars().all()
+    return [RepoResponse.model_validate(r) for r in repos]
+
+
+@router.get(
+    "/{repo_id}",
+    response_model=RepoResponse,
+    summary="Get repository details with ownership enforcement",
+)
+async def get_repository(
+    repo_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> RepoResponse:
+    """Retrieve a single repository. Enforces user ownership; returns 404 if not found or unauthorized."""
+    stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    result = await db.execute(stmt)
+    repo = result.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+    return RepoResponse.model_validate(repo)
+
+
+@router.delete(
+    "/{repo_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an imported repository",
+)
+async def delete_repository(
+    repo_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Delete a repository and its cascading records. Returns 404 if not found or not owned."""
+    stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    result = await db.execute(stmt)
+    repo = result.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    await db.delete(repo)
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
