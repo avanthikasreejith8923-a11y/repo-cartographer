@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.logging import logger
 from app.models.commit import Commit
+from app.models.issue import Issue
 from app.models.pull_request import PullRequest
 from app.models.repository import Repository
 from app.models.sync_job import SyncJob
@@ -195,6 +196,75 @@ async def sync_pull_requests_stage(
     return upserted_count
 
 
+async def sync_issues_stage(
+    repo: Repository,
+    client: GitHubClient,
+    db: AsyncSession,
+) -> int:
+    """Stage 4: Fetch and idempotently upsert issues, explicitly filtering out pull requests."""
+    owner, repo_name = repo.full_name.split("/", 1)
+    logger.info(f"Sync stage [issues]: Fetching issues for {owner}/{repo_name}")
+    raw_items = await client.list_issues(
+        owner=owner,
+        repo=repo_name,
+        state="all",
+        max_items=settings.SYNC_MAX_ISSUES,
+    )
+
+    upserted_count = 0
+    for item in raw_items:
+        # Filter out items containing a `pull_request` key
+        if "pull_request" in item:
+            continue
+
+        number = item["number"]
+        author_meta = item.get("user") or {}
+        created_at = parse_github_datetime(item.get("created_at"))
+        closed_at = parse_github_datetime(item.get("closed_at")) if item.get("closed_at") else None
+
+        raw_labels = item.get("labels", [])
+        labels = [
+            {
+                "id": lbl.get("id"),
+                "name": lbl.get("name"),
+                "color": lbl.get("color"),
+                "description": lbl.get("description"),
+            }
+            if isinstance(lbl, dict)
+            else {"name": str(lbl)}
+            for lbl in raw_labels
+        ]
+
+        insert_stmt = insert(Issue).values(
+            repo_id=repo.id,
+            number=number,
+            title=item.get("title", ""),
+            body=item.get("body"),
+            state=item.get("state", "open"),
+            labels=labels,
+            author_login=author_meta.get("login"),
+            created_at=created_at,
+            closed_at=closed_at,
+        )
+        upsert_stmt = insert_stmt.on_conflict_do_update(
+            index_elements=["repo_id", "number"],
+            set_={
+                "title": insert_stmt.excluded.title,
+                "body": insert_stmt.excluded.body,
+                "state": insert_stmt.excluded.state,
+                "labels": insert_stmt.excluded.labels,
+                "author_login": insert_stmt.excluded.author_login,
+                "closed_at": insert_stmt.excluded.closed_at,
+                "updated_at": func.now(),
+            },
+        )
+        await db.execute(upsert_stmt)
+        upserted_count += 1
+
+    await db.flush()
+    return upserted_count
+
+
 async def execute_repo_sync(repo_id: str | uuid.UUID, db: AsyncSession) -> None:
     """Execute background ingestion pipeline across stages: metadata -> commits -> PRs -> issues."""
     if isinstance(repo_id, str):
@@ -273,7 +343,15 @@ async def execute_repo_sync(repo_id: str | uuid.UUID, db: AsyncSession) -> None:
         sync_job.progress = 75
         await db.commit()
 
-        # Placeholders for stage 4 (issues - implemented in commit 12)
+        # Stage 4: Issues (excluding PRs)
+        sync_job.stage = "issues"
+        sync_job.progress = 80
+        await db.commit()
+
+        await sync_issues_stage(repo=repo, client=client, db=db)
+        sync_job.progress = 95
+        await db.commit()
+
         repo.status = "ready"
         repo.last_synced_at = datetime.now(UTC)
         repo.sync_error = None

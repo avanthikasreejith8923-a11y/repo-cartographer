@@ -75,6 +75,10 @@ async def test_sync_metadata_stage_success(
             status_code=200,
             json=[],
         )
+        respx_mock.get(path=f"/repos/{repo.full_name}/issues").respond(
+            status_code=200,
+            json=[],
+        )
 
         await execute_repo_sync(repo_id=repo.id, db=fake_db)
 
@@ -157,6 +161,10 @@ async def test_sync_commits_stage_ingestion_and_stats(
             status_code=200,
             json=[],
         )
+        respx_mock.get(path=f"/repos/{repo.full_name}/issues").respond(
+            status_code=200,
+            json=[],
+        )
 
         await execute_repo_sync(repo_id=repo.id, db=fake_db)
 
@@ -208,6 +216,10 @@ async def test_sync_commits_stage_idempotency(
             },
         )
         respx_mock.get(path=f"/repos/{repo.full_name}/pulls").respond(
+            status_code=200,
+            json=[],
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/issues").respond(
             status_code=200,
             json=[],
         )
@@ -263,6 +275,10 @@ async def test_sync_pull_requests_stage_ingestion_and_stats(
                 "deletions": 20,
                 "changed_files": 5,
             },
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/issues").respond(
+            status_code=200,
+            json=[],
         )
 
         await execute_repo_sync(repo_id=repo.id, db=fake_db)
@@ -321,6 +337,10 @@ async def test_sync_pull_requests_stage_idempotency(
                 "changed_files": 1,
             },
         )
+        respx_mock.get(path=f"/repos/{repo.full_name}/issues").respond(
+            status_code=200,
+            json=[],
+        )
 
         # Run 1
         await execute_repo_sync(repo_id=repo.id, db=fake_db)
@@ -330,4 +350,119 @@ async def test_sync_pull_requests_stage_idempotency(
         # Run 2
         await execute_repo_sync(repo_id=repo.id, db=fake_db)
         count_second = len([p for p in fake_db.pulls_by_id.values() if p.repo_id == repo.id])
+        assert count_second == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_issues_stage_ingestion_and_pr_exclusion(
+    fake_db: InMemoryAsyncSession,
+    sync_fixtures: tuple[User, Repository, SyncJob],
+):
+    """Verify issues are ingested and items with pull_request key are excluded."""
+    user, repo, job = sync_fixtures
+
+    with respx.mock(base_url="https://api.github.com") as respx_mock:
+        respx_mock.get(path=f"/repos/{repo.full_name}").respond(
+            status_code=200,
+            json={"id": repo.github_id, "name": "sample-repo", "full_name": repo.full_name},
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/commits").respond(
+            status_code=200,
+            json=[],
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/pulls").respond(
+            status_code=200,
+            json=[],
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/issues").respond(
+            status_code=200,
+            json=[
+                {
+                    "number": 301,
+                    "title": "Bug: DB connection pool exhaustion",
+                    "body": "Connections leak when requests time out",
+                    "state": "open",
+                    "user": {"login": "evedev"},
+                    "labels": [
+                        {"id": 1, "name": "bug", "color": "d73a4a", "description": "Something isn't working"},
+                        {"id": 2, "name": "backend", "color": "0075ca", "description": "Backend area"},
+                    ],
+                    "created_at": "2026-10-02T15:00:00Z",
+                    "closed_at": None,
+                },
+                {
+                    # This item is a pull request returned in the /issues endpoint by GitHub
+                    "number": 302,
+                    "title": "Fix: increase pool size",
+                    "state": "open",
+                    "user": {"login": "evedev"},
+                    "pull_request": {"url": "https://api.github.com/repos/synctester/sample-repo/pulls/302"},
+                    "created_at": "2026-10-02T16:00:00Z",
+                },
+            ],
+        )
+
+        await execute_repo_sync(repo_id=repo.id, db=fake_db)
+
+        issues = [i for i in fake_db.issues_by_id.values() if i.repo_id == repo.id]
+        assert len(issues) == 1
+        issue = issues[0]
+        assert issue.number == 301
+        assert issue.title == "Bug: DB connection pool exhaustion"
+        assert issue.body == "Connections leak when requests time out"
+        assert issue.state == "open"
+        assert issue.author_login == "evedev"
+        assert len(issue.labels) == 2
+        assert issue.labels[0]["name"] == "bug"
+        assert issue.labels[1]["name"] == "backend"
+
+        # Verify PR #302 was NOT added as an issue
+        assert not any(i.number == 302 for i in issues)
+
+
+@pytest.mark.asyncio
+async def test_sync_issues_stage_idempotency(
+    fake_db: InMemoryAsyncSession,
+    sync_fixtures: tuple[User, Repository, SyncJob],
+):
+    """Verify running issue sync twice is idempotent and does not create duplicate rows."""
+    user, repo, job = sync_fixtures
+
+    with respx.mock(base_url="https://api.github.com") as respx_mock:
+        respx_mock.get(path=f"/repos/{repo.full_name}").respond(
+            status_code=200,
+            json={"id": repo.github_id, "name": "sample-repo", "full_name": repo.full_name},
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/commits").respond(
+            status_code=200,
+            json=[],
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/pulls").respond(
+            status_code=200,
+            json=[],
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/issues").respond(
+            status_code=200,
+            json=[
+                {
+                    "number": 401,
+                    "title": "Documentation typo in setup guide",
+                    "body": "Fix typo on line 12",
+                    "state": "closed",
+                    "user": {"login": "frankdev"},
+                    "labels": [{"id": 3, "name": "documentation", "color": "0075ca"}],
+                    "created_at": "2026-10-01T12:00:00Z",
+                    "closed_at": "2026-10-01T13:00:00Z",
+                }
+            ],
+        )
+
+        # First run
+        await execute_repo_sync(repo_id=repo.id, db=fake_db)
+        count_first = len([i for i in fake_db.issues_by_id.values() if i.repo_id == repo.id])
+        assert count_first == 1
+
+        # Second run
+        await execute_repo_sync(repo_id=repo.id, db=fake_db)
+        count_second = len([i for i in fake_db.issues_by_id.values() if i.repo_id == repo.id])
         assert count_second == 1
