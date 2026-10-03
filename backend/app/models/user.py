@@ -1,12 +1,16 @@
 """User ORM Model representing an authenticated GitHub user."""
 
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy import BigInteger, String, Text
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.repository import Repository
 
 
 class User(Base, TimestampMixin):
@@ -47,6 +51,13 @@ class User(Base, TimestampMixin):
     encrypted_access_token: Mapped[str] = mapped_column(
         Text,
         nullable=False,
+    )
+
+    # Relationships
+    repositories: Mapped[list["Repository"]] = relationship(
+        "Repository",
+        back_populates="user",
+        cascade="all, delete-orphan",
     )
 
     def __repr__(self) -> str:
