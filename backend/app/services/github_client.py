@@ -1,6 +1,8 @@
-"""Async GitHub API Client with generic RFC 5988 pagination and token decryption."""
+"""Async GitHub API Client with rate limit tracking, exponential backoff, and pagination."""
 
+import asyncio
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -18,14 +20,49 @@ class GitHubAPIError(Exception):
         self.response_body = response_body
 
 
+class GitHubRateLimitExhaustedError(GitHubAPIError):
+    """Exception raised when primary GitHub API rate limit is fully exhausted."""
+
+    def __init__(self, message: str, reset_timestamp: int | None = None, status_code: int = 403):
+        super().__init__(message, status_code=status_code)
+        self.reset_timestamp = reset_timestamp
+
+    @property
+    def reset_datetime(self) -> datetime | None:
+        """UTC datetime when the primary rate limit resets."""
+        if self.reset_timestamp:
+            return datetime.fromtimestamp(self.reset_timestamp, tz=UTC)
+        return None
+
+
+class GitHubSecondaryRateLimitError(GitHubAPIError):
+    """Exception raised when hitting secondary rate limits or abuse detection."""
+
+    def __init__(self, message: str, retry_after: float | None = None, status_code: int = 403):
+        super().__init__(message, status_code=status_code)
+        self.retry_after = retry_after
+
+
 class GitHubClient:
     """Asynchronous client for interacting with the GitHub REST API."""
 
     BASE_URL = "https://api.github.com"
 
-    def __init__(self, encrypted_token: str):
+    def __init__(
+        self,
+        encrypted_token: str,
+        max_retries: int = 3,
+        backoff_factor: float = 0.5,
+        timeout: float = 30.0,
+    ):
         """Initialize client with Fernet-encrypted GitHub personal access token."""
         self._encrypted_token = encrypted_token
+        self.max_retries = max_retries
+        self.backoff_factor = backoff_factor
+        self.timeout = timeout
+        self.rate_limit_remaining: int | None = None
+        self.rate_limit_reset: int | None = None
+        self.rate_limit_limit: int | None = None
 
     def _get_auth_headers(self) -> dict[str, str]:
         """Decrypt token at call-time and return authorization headers.
@@ -40,6 +77,28 @@ class GitHubClient:
             "User-Agent": "repo-cartographer",
         }
 
+    def _update_rate_limits(self, response: httpx.Response) -> None:
+        """Update tracked rate limit attributes from response headers."""
+        remaining = response.headers.get("x-ratelimit-remaining")
+        reset = response.headers.get("x-ratelimit-reset")
+        limit = response.headers.get("x-ratelimit-limit")
+
+        if remaining is not None:
+            try:
+                self.rate_limit_remaining = int(remaining)
+            except ValueError:
+                pass
+        if reset is not None:
+            try:
+                self.rate_limit_reset = int(reset)
+            except ValueError:
+                pass
+        if limit is not None:
+            try:
+                self.rate_limit_limit = int(limit)
+            except ValueError:
+                pass
+
     def _parse_next_link(self, link_header: str | None) -> str | None:
         """Parse RFC 5988 Link header for rel='next' URL."""
         if not link_header:
@@ -49,6 +108,25 @@ class GitHubClient:
             return match.group(1)
         return None
 
+    def _get_retry_after(self, response: httpx.Response) -> float | None:
+        """Extract Retry-After duration in seconds from response headers if present."""
+        retry_header = response.headers.get("Retry-After")
+        if retry_header:
+            try:
+                return float(retry_header)
+            except ValueError:
+                pass
+        return None
+
+    def _is_secondary_rate_limit(self, response: httpx.Response) -> bool:
+        """Detect whether a response indicates GitHub secondary rate limit."""
+        if response.status_code == 429:
+            return True
+        if response.status_code == 403:
+            body = response.text.lower()
+            return "secondary rate limit" in body or "please wait a few minutes" in body
+        return False
+
     async def _request(
         self,
         method: str,
@@ -56,30 +134,87 @@ class GitHubClient:
         params: dict[str, Any] | None = None,
         json_data: dict[str, Any] | None = None,
     ) -> httpx.Response:
-        """Execute HTTP request against GitHub API with authorization headers."""
+        """Execute HTTP request with exponential backoff and rate limit tracking."""
         url = url_or_path if url_or_path.startswith("http") else f"{self.BASE_URL}{url_or_path}"
         headers = self._get_auth_headers()
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.request(
-                method=method,
-                url=url,
-                headers=headers,
-                params=params,
-                json=json_data,
-            )
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.request(
+                        method=method,
+                        url=url,
+                        headers=headers,
+                        params=params,
+                        json=json_data,
+                    )
 
-        if response.status_code >= 400:
-            logger.warning(
-                f"GitHub API error {response.status_code} on {method} {url}"
-            )
-            raise GitHubAPIError(
-                f"GitHub API request failed with status {response.status_code}",
-                status_code=response.status_code,
-                response_body=response.text,
-            )
+                self._update_rate_limits(response)
 
-        return response
+                # Check primary rate limit exhaustion
+                if response.status_code == 403 and self.rate_limit_remaining == 0:
+                    reset_str = (
+                        datetime.fromtimestamp(self.rate_limit_reset, tz=UTC).isoformat()
+                        if self.rate_limit_reset
+                        else "unknown"
+                    )
+                    raise GitHubRateLimitExhaustedError(
+                        f"GitHub API primary rate limit exhausted. Resets at {reset_str}.",
+                        reset_timestamp=self.rate_limit_reset,
+                    )
+
+                # Check secondary rate limit (429 or 403 secondary)
+                if self._is_secondary_rate_limit(response):
+                    retry_after = self._get_retry_after(response) or (self.backoff_factor * (2 ** (attempt - 1)))
+                    if attempt <= self.max_retries:
+                        logger.warning(
+                            f"GitHub secondary rate limit encountered on {method} {url}. "
+                            f"Retrying in {retry_after:.1f}s (attempt {attempt}/{self.max_retries})."
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue
+                    raise GitHubSecondaryRateLimitError(
+                        f"GitHub API secondary rate limit exceeded after {attempt} attempts.",
+                        retry_after=retry_after,
+                        status_code=response.status_code,
+                    )
+
+                # Check 5xx server errors
+                if 500 <= response.status_code < 600:
+                    if attempt <= self.max_retries:
+                        delay = self.backoff_factor * (2 ** (attempt - 1))
+                        logger.warning(
+                            f"GitHub API returned {response.status_code} on {method} {url}. "
+                            f"Retrying in {delay:.1f}s (attempt {attempt}/{self.max_retries})."
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+
+                # Raise for any remaining 4xx/5xx errors
+                if response.status_code >= 400:
+                    logger.warning(
+                        f"GitHub API error {response.status_code} on {method} {url}"
+                    )
+                    raise GitHubAPIError(
+                        f"GitHub API request failed with status {response.status_code}",
+                        status_code=response.status_code,
+                        response_body=response.text,
+                    )
+
+                return response
+
+            except (httpx.RequestError, httpx.TimeoutException) as exc:
+                if attempt <= self.max_retries:
+                    delay = self.backoff_factor * (2 ** (attempt - 1))
+                    logger.warning(
+                        f"Network exception ({type(exc).__name__}) contacting GitHub on {method} {url}. "
+                        f"Retrying in {delay:.1f}s (attempt {attempt}/{self.max_retries})."
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise GitHubAPIError(f"GitHub network communication failure: {exc}") from exc
 
     async def paginate(
         self,
