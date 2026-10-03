@@ -286,3 +286,191 @@ async def test_delete_repository_success_and_ownership(
     resp_own = await client.delete(f"/repos/{repo1.id}", cookies=cookies1)
     assert resp_own.status_code == 204
     assert repo1.id not in fake_db.repos_by_id
+
+
+@pytest.mark.asyncio
+async def test_trigger_sync_and_get_sync_status(
+    client: httpx.AsyncClient,
+    fake_db: InMemoryAsyncSession,
+):
+    """POST /repos/{id}/sync triggers a re-sync and GET /repos/{id}/sync-status returns progress."""
+    user, cookies = create_authenticated_user(fake_db)
+
+    repo = Repository(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        github_id=501,
+        full_name="testuser/resync-repo",
+        status="ready",
+    )
+    fake_db.add(repo)
+
+    # 1. Trigger sync
+    resp_sync = await client.post(f"/repos/{repo.id}/sync", cookies=cookies)
+    assert resp_sync.status_code == 202
+    sync_data = resp_sync.json()
+    assert sync_data["status"] == "pending"
+    assert sync_data["stage"] == "queued"
+    assert sync_data["progress"] == 0
+    assert repo.status == "pending"
+
+    # 2. Get sync status
+    resp_status = await client.get(f"/repos/{repo.id}/sync-status", cookies=cookies)
+    assert resp_status.status_code == 200
+    status_data = resp_status.json()
+    assert status_data["id"] == sync_data["id"]
+    assert status_data["stage"] == "queued"
+
+    # 3. Another user accessing this repo returns 404
+    _, other_cookies = create_authenticated_user(fake_db)
+    resp_unauth = await client.get(f"/repos/{repo.id}/sync-status", cookies=other_cookies)
+    assert resp_unauth.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_list_repo_commits(
+    client: httpx.AsyncClient,
+    fake_db: InMemoryAsyncSession,
+):
+    """GET /repos/{id}/commits retrieves commits with author filtering."""
+    from datetime import UTC, datetime
+
+    from app.models.commit import Commit
+
+    user, cookies = create_authenticated_user(fake_db)
+    repo = Repository(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        github_id=601,
+        full_name="testuser/commits-repo",
+        status="ready",
+    )
+    fake_db.add(repo)
+
+    c1 = Commit(
+        id=uuid.uuid4(),
+        repo_id=repo.id,
+        sha="1111111111111111111111111111111111111111",
+        author_login="alice",
+        author_name="Alice A",
+        message="feat: first commit",
+        committed_at=datetime(2026, 10, 1, 10, 0, 0, tzinfo=UTC),
+        additions=10,
+        deletions=2,
+        files_changed=1,
+    )
+    c2 = Commit(
+        id=uuid.uuid4(),
+        repo_id=repo.id,
+        sha="2222222222222222222222222222222222222222",
+        author_login="bob",
+        author_name="Bob B",
+        message="fix: bugfix commit",
+        committed_at=datetime(2026, 10, 2, 11, 0, 0, tzinfo=UTC),
+        additions=5,
+        deletions=1,
+        files_changed=1,
+    )
+    fake_db.add(c1)
+    fake_db.add(c2)
+
+    # All commits
+    res = await client.get(f"/repos/{repo.id}/commits", cookies=cookies)
+    assert res.status_code == 200
+    items = res.json()
+    assert len(items) == 2
+
+    # Filter by author alice
+    res_filtered = await client.get(f"/repos/{repo.id}/commits?author=alice", cookies=cookies)
+    assert res_filtered.status_code == 200
+    filtered_items = res_filtered.json()
+    assert len(filtered_items) == 1
+    assert filtered_items[0]["author_login"] == "alice"
+
+
+@pytest.mark.asyncio
+async def test_list_repo_pulls_and_issues(
+    client: httpx.AsyncClient,
+    fake_db: InMemoryAsyncSession,
+):
+    """GET /repos/{id}/pulls and /repos/{id}/issues return items with state filtering."""
+    from datetime import UTC, datetime
+
+    from app.models.issue import Issue
+    from app.models.pull_request import PullRequest
+
+    user, cookies = create_authenticated_user(fake_db)
+    repo = Repository(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        github_id=701,
+        full_name="testuser/items-repo",
+        status="ready",
+    )
+    fake_db.add(repo)
+
+    # PRs: 1 open, 1 closed
+    pr1 = PullRequest(
+        id=uuid.uuid4(),
+        repo_id=repo.id,
+        number=1,
+        title="Open PR",
+        state="open",
+        author_login="charlie",
+        created_at=datetime(2026, 10, 1, tzinfo=UTC),
+    )
+    pr2 = PullRequest(
+        id=uuid.uuid4(),
+        repo_id=repo.id,
+        number=2,
+        title="Closed PR",
+        state="closed",
+        author_login="charlie",
+        created_at=datetime(2026, 10, 2, tzinfo=UTC),
+    )
+    fake_db.add(pr1)
+    fake_db.add(pr2)
+
+    # Issues: 1 open, 1 closed
+    issue1 = Issue(
+        id=uuid.uuid4(),
+        repo_id=repo.id,
+        number=10,
+        title="Open issue",
+        state="open",
+        labels=[{"name": "bug"}],
+        author_login="dave",
+        created_at=datetime(2026, 10, 1, tzinfo=UTC),
+    )
+    issue2 = Issue(
+        id=uuid.uuid4(),
+        repo_id=repo.id,
+        number=20,
+        title="Closed issue",
+        state="closed",
+        labels=[{"name": "enhancement"}],
+        author_login="dave",
+        created_at=datetime(2026, 10, 2, tzinfo=UTC),
+    )
+    fake_db.add(issue1)
+    fake_db.add(issue2)
+
+    # PRs: all vs open
+    res_all_prs = await client.get(f"/repos/{repo.id}/pulls", cookies=cookies)
+    assert res_all_prs.status_code == 200
+    assert len(res_all_prs.json()) == 2
+
+    res_open_prs = await client.get(f"/repos/{repo.id}/pulls?state=open", cookies=cookies)
+    assert res_open_prs.status_code == 200
+    assert len(res_open_prs.json()) == 1
+    assert res_open_prs.json()[0]["number"] == 1
+
+    # Issues: all vs closed
+    res_all_issues = await client.get(f"/repos/{repo.id}/issues", cookies=cookies)
+    assert res_all_issues.status_code == 200
+    assert len(res_all_issues.json()) == 2
+
+    res_closed_issues = await client.get(f"/repos/{repo.id}/issues?state=closed", cookies=cookies)
+    assert res_closed_issues.status_code == 200
+    assert len(res_closed_issues.json()) == 1
+    assert res_closed_issues.json()[0]["number"] == 20

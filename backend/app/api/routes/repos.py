@@ -1,6 +1,7 @@
 """API routes for repository discovery, import, and management."""
 
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
@@ -8,14 +9,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
+from app.models.commit import Commit
+from app.models.issue import Issue
+from app.models.pull_request import PullRequest
 from app.models.repository import Repository
 from app.models.sync_job import SyncJob
 from app.models.user import User
 from app.schemas.repository import (
     AvailableRepoResponse,
+    CommitResponse,
+    IssueResponse,
+    PullRequestResponse,
     RepoImportRequest,
     RepoImportResponse,
     RepoResponse,
+    SyncJobResponse,
 )
 from app.services.github_client import GitHubAPIError, GitHubClient
 from app.services.queue import enqueue_sync_job
@@ -220,3 +228,205 @@ async def delete_repository(
     await db.delete(repo)
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{repo_id}/sync",
+    response_model=SyncJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Trigger asynchronous re-synchronization of a repository",
+)
+async def trigger_sync(
+    repo_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SyncJobResponse:
+    """Trigger background re-sync for a repository owned by the authenticated user."""
+    stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    result = await db.execute(stmt)
+    repo = result.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    repo.status = "pending"
+    repo.sync_error = None
+
+    sync_job = SyncJob(
+        repo_id=repo.id,
+        status="pending",
+        stage="queued",
+        progress=0,
+    )
+    db.add(sync_job)
+    await db.commit()
+
+    await enqueue_sync_job(repo.id)
+    return SyncJobResponse.model_validate(sync_job)
+
+
+@router.get(
+    "/{repo_id}/sync-status",
+    response_model=SyncJobResponse,
+    summary="Get current or latest sync job status and progress for a repository",
+)
+async def get_sync_status(
+    repo_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SyncJobResponse:
+    """Retrieve the latest sync job status. Returns 404 if repository or sync job is not found."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    job_stmt = (
+        select(SyncJob)
+        .where(SyncJob.repo_id == repo.id)
+        .order_by(SyncJob.created_at.desc())
+    )
+    job_res = await db.execute(job_stmt)
+    sync_job = job_res.scalars().first()
+    if not sync_job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No sync job found for repository",
+        )
+
+    return SyncJobResponse.model_validate(sync_job)
+
+
+@router.get(
+    "/{repo_id}/commits",
+    response_model=list[CommitResponse],
+    summary="List ingested commits for a repository with optional filtering",
+)
+async def list_repo_commits(
+    repo_id: uuid.UUID,
+    author: str | None = Query(None, description="Filter by author login or name"),
+    since: datetime | None = Query(None, description="Only commits after this timestamp"),
+    until: datetime | None = Query(None, description="Only commits before this timestamp"),
+    limit: int = Query(50, ge=1, le=100, description="Items per page"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[CommitResponse]:
+    """Retrieve commits for a repository owned by current user."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    query = select(Commit).where(Commit.repo_id == repo.id)
+    if author:
+        author_filter = f"%{author}%"
+        query = query.where(
+            (Commit.author_login.ilike(author_filter)) | (Commit.author_name.ilike(author_filter))
+        )
+    if since:
+        query = query.where(Commit.committed_at >= since)
+    if until:
+        query = query.where(Commit.committed_at <= until)
+
+    query = query.order_by(Commit.committed_at.desc()).offset(offset).limit(limit)
+    res = await db.execute(query)
+    commits = res.scalars().all()
+    return [CommitResponse.model_validate(c) for c in commits]
+
+
+@router.get(
+    "/{repo_id}/pulls",
+    response_model=list[PullRequestResponse],
+    summary="List ingested pull requests for a repository with optional filtering",
+)
+async def list_repo_pull_requests(
+    repo_id: uuid.UUID,
+    state: str = Query("all", pattern="^(open|closed|all)$", description="Filter by state (open, closed, all)"),
+    author: str | None = Query(None, description="Filter by author login"),
+    limit: int = Query(50, ge=1, le=100, description="Items per page"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[PullRequestResponse]:
+    """Retrieve pull requests for a repository owned by current user."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    query = select(PullRequest).where(PullRequest.repo_id == repo.id)
+    if state != "all":
+        query = query.where(PullRequest.state == state)
+    if author:
+        query = query.where(PullRequest.author_login.ilike(f"%{author}%"))
+
+    query = query.order_by(PullRequest.created_at.desc()).offset(offset).limit(limit)
+    res = await db.execute(query)
+    prs = res.scalars().all()
+    return [PullRequestResponse.model_validate(p) for p in prs]
+
+
+@router.get(
+    "/{repo_id}/issues",
+    response_model=list[IssueResponse],
+    summary="List ingested issues for a repository with optional filtering",
+)
+async def list_repo_issues(
+    repo_id: uuid.UUID,
+    state: str = Query("all", pattern="^(open|closed|all)$", description="Filter by state (open, closed, all)"),
+    author: str | None = Query(None, description="Filter by author login"),
+    limit: int = Query(50, ge=1, le=100, description="Items per page"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[IssueResponse]:
+    """Retrieve issues for a repository owned by current user."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    query = select(Issue).where(Issue.repo_id == repo.id)
+    if state != "all":
+        query = query.where(Issue.state == state)
+    if author:
+        query = query.where(Issue.author_login.ilike(f"%{author}%"))
+
+    query = query.order_by(Issue.created_at.desc()).offset(offset).limit(limit)
+    res = await db.execute(query)
+    issues = res.scalars().all()
+    return [IssueResponse.model_validate(i) for i in issues]

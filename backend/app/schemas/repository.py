@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -77,3 +78,61 @@ class RepoImportResponse(BaseModel):
 
     repository: RepoResponse
     sync_job: SyncJobResponse | None = None
+
+
+class CommitResponse(BaseModel):
+    """Schema for stored Commit details."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    repo_id: uuid.UUID
+    sha: str
+    author_login: str | None = None
+    author_name: str | None = None
+    message: str
+    committed_at: datetime
+    additions: int | None = None
+    deletions: int | None = None
+    files_changed: int | None = None
+    created_at: datetime
+
+
+class PullRequestResponse(BaseModel):
+    """Schema for stored Pull Request details."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    repo_id: uuid.UUID
+    number: int
+    title: str
+    body: str | None = None
+    state: str
+    author_login: str | None = None
+    created_at: datetime
+    merged_at: datetime | None = None
+    closed_at: datetime | None = None
+    additions: int | None = None
+    deletions: int | None = None
+    changed_files: int | None = None
+    base_ref: str | None = None
+    head_ref: str | None = None
+
+
+class IssueResponse(BaseModel):
+    """Schema for stored Issue details."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    repo_id: uuid.UUID
+    number: int
+    title: str
+    body: str | None = None
+    state: str
+    labels: list[dict[str, Any]] = Field(default_factory=list)
+    author_login: str | None = None
+    created_at: datetime
+    closed_at: datetime | None = None
+

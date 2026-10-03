@@ -245,6 +245,14 @@ class InMemoryAsyncSession:
                 c for c in self.commits_by_id.values()
                 if repo_id is None or c.repo_id == repo_id
             ]
+            for v in params.values():
+                if isinstance(v, str) and v.startswith("%") and v.endswith("%"):
+                    sub = v.strip("%").lower()
+                    matched_commits = [
+                        c for c in matched_commits
+                        if (c.author_login and sub in c.author_login.lower())
+                        or (c.author_name and sub in c.author_name.lower())
+                    ]
             matched_commits.sort(key=lambda c: c.committed_at, reverse=True)
             return FakeScalarResult(matched_commits[0] if matched_commits else None, items=matched_commits)
 
@@ -255,6 +263,12 @@ class InMemoryAsyncSession:
                 p for p in self.pulls_by_id.values()
                 if repo_id is None or p.repo_id == repo_id
             ]
+            for v in params.values():
+                if v in ("open", "closed"):
+                    matched_prs = [p for p in matched_prs if p.state == v]
+                elif isinstance(v, str) and v.startswith("%") and v.endswith("%"):
+                    sub = v.strip("%").lower()
+                    matched_prs = [p for p in matched_prs if p.author_login and sub in p.author_login.lower()]
             matched_prs.sort(key=lambda p: p.created_at, reverse=True)
             return FakeScalarResult(matched_prs[0] if matched_prs else None, items=matched_prs)
 
@@ -265,6 +279,12 @@ class InMemoryAsyncSession:
                 i for i in self.issues_by_id.values()
                 if repo_id is None or i.repo_id == repo_id
             ]
+            for v in params.values():
+                if v in ("open", "closed"):
+                    matched_issues = [i for i in matched_issues if i.state == v]
+                elif isinstance(v, str) and v.startswith("%") and v.endswith("%"):
+                    sub = v.strip("%").lower()
+                    matched_issues = [i for i in matched_issues if i.author_login and sub in i.author_login.lower()]
             matched_issues.sort(key=lambda i: i.created_at, reverse=True)
             return FakeScalarResult(matched_issues[0] if matched_issues else None, items=matched_issues)
 
