@@ -68,7 +68,7 @@ class InMemoryAsyncSession:
         stmt_str = str(statement)
 
         # Health check query: SELECT 1
-        if "1" in stmt_str and "SELECT" in stmt_str and "users" not in stmt_str and "repositories" not in stmt_str:
+        if stmt_str.strip().startswith("SELECT 1") or stmt_str.strip() == "SELECT 1":
             return FakeScalarResult(1)
 
         # Extract compiled bound params
