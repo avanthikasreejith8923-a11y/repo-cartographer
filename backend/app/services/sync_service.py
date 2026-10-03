@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.logging import logger
 from app.models.commit import Commit
+from app.models.pull_request import PullRequest
 from app.models.repository import Repository
 from app.models.sync_job import SyncJob
 from app.models.user import User
@@ -117,6 +118,83 @@ async def sync_commits_stage(
     return upserted_count
 
 
+async def sync_pull_requests_stage(
+    repo: Repository,
+    client: GitHubClient,
+    db: AsyncSession,
+) -> int:
+    """Stage 3: Fetch and idempotently upsert pull requests with additions/deletions stats."""
+    owner, repo_name = repo.full_name.split("/", 1)
+    logger.info(f"Sync stage [pull_requests]: Fetching PRs for {owner}/{repo_name}")
+    raw_prs = await client.list_pull_requests(
+        owner=owner,
+        repo=repo_name,
+        state="all",
+        max_items=settings.SYNC_MAX_PRS,
+    )
+
+    upserted_count = 0
+    for idx, pr in enumerate(raw_prs):
+        number = pr["number"]
+        author_meta = pr.get("user") or {}
+        created_at = parse_github_datetime(pr.get("created_at"))
+        merged_at = parse_github_datetime(pr.get("merged_at")) if pr.get("merged_at") else None
+        closed_at = parse_github_datetime(pr.get("closed_at")) if pr.get("closed_at") else None
+
+        additions: int | None = None
+        deletions: int | None = None
+        changed_files: int | None = None
+
+        # Fetch per-item stats only for the most recent N PRs to protect rate limits
+        if idx < settings.SYNC_STATS_PRS_LIMIT:
+            try:
+                detail = await client.get_pull_request(owner=owner, repo=repo_name, number=number)
+                additions = detail.get("additions")
+                deletions = detail.get("deletions")
+                changed_files = detail.get("changed_files")
+            except Exception as e:
+                logger.debug(f"Could not fetch stats for PR #{number}: {e}")
+
+        insert_stmt = insert(PullRequest).values(
+            repo_id=repo.id,
+            number=number,
+            title=pr.get("title", ""),
+            body=pr.get("body"),
+            state=pr.get("state", "open"),
+            author_login=author_meta.get("login"),
+            created_at=created_at,
+            merged_at=merged_at,
+            closed_at=closed_at,
+            additions=additions,
+            deletions=deletions,
+            changed_files=changed_files,
+            base_ref=pr.get("base", {}).get("ref"),
+            head_ref=pr.get("head", {}).get("ref"),
+        )
+        upsert_stmt = insert_stmt.on_conflict_do_update(
+            index_elements=["repo_id", "number"],
+            set_={
+                "title": insert_stmt.excluded.title,
+                "body": insert_stmt.excluded.body,
+                "state": insert_stmt.excluded.state,
+                "author_login": insert_stmt.excluded.author_login,
+                "merged_at": insert_stmt.excluded.merged_at,
+                "closed_at": insert_stmt.excluded.closed_at,
+                "additions": insert_stmt.excluded.additions,
+                "deletions": insert_stmt.excluded.deletions,
+                "changed_files": insert_stmt.excluded.changed_files,
+                "base_ref": insert_stmt.excluded.base_ref,
+                "head_ref": insert_stmt.excluded.head_ref,
+                "updated_at": func.now(),
+            },
+        )
+        await db.execute(upsert_stmt)
+        upserted_count += 1
+
+    await db.flush()
+    return upserted_count
+
+
 async def execute_repo_sync(repo_id: str | uuid.UUID, db: AsyncSession) -> None:
     """Execute background ingestion pipeline across stages: metadata -> commits -> PRs -> issues."""
     if isinstance(repo_id, str):
@@ -186,7 +264,16 @@ async def execute_repo_sync(repo_id: str | uuid.UUID, db: AsyncSession) -> None:
         sync_job.progress = 50
         await db.commit()
 
-        # Placeholders for stages 3, 4 (implemented in subsequent commits)
+        # Stage 3: Pull Requests
+        sync_job.stage = "pull_requests"
+        sync_job.progress = 55
+        await db.commit()
+
+        await sync_pull_requests_stage(repo=repo, client=client, db=db)
+        sync_job.progress = 75
+        await db.commit()
+
+        # Placeholders for stage 4 (issues - implemented in commit 12)
         repo.status = "ready"
         repo.last_synced_at = datetime.now(UTC)
         repo.sync_error = None

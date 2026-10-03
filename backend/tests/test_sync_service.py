@@ -71,6 +71,10 @@ async def test_sync_metadata_stage_success(
             status_code=200,
             json=[],
         )
+        respx_mock.get(path=f"/repos/{repo.full_name}/pulls").respond(
+            status_code=200,
+            json=[],
+        )
 
         await execute_repo_sync(repo_id=repo.id, db=fake_db)
 
@@ -149,6 +153,10 @@ async def test_sync_commits_stage_ingestion_and_stats(
                 "files": [{}, {}],
             },
         )
+        respx_mock.get(path=f"/repos/{repo.full_name}/pulls").respond(
+            status_code=200,
+            json=[],
+        )
 
         await execute_repo_sync(repo_id=repo.id, db=fake_db)
 
@@ -199,6 +207,10 @@ async def test_sync_commits_stage_idempotency(
                 "files": [{}],
             },
         )
+        respx_mock.get(path=f"/repos/{repo.full_name}/pulls").respond(
+            status_code=200,
+            json=[],
+        )
 
         # First sync run
         await execute_repo_sync(repo_id=repo.id, db=fake_db)
@@ -208,4 +220,114 @@ async def test_sync_commits_stage_idempotency(
         # Second sync run
         await execute_repo_sync(repo_id=repo.id, db=fake_db)
         count_second = len([c for c in fake_db.commits_by_id.values() if c.repo_id == repo.id])
+        assert count_second == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_pull_requests_stage_ingestion_and_stats(
+    fake_db: InMemoryAsyncSession,
+    sync_fixtures: tuple[User, Repository, SyncJob],
+):
+    """Verify PRs are ingested with details and stats."""
+    user, repo, job = sync_fixtures
+
+    with respx.mock(base_url="https://api.github.com") as respx_mock:
+        respx_mock.get(path=f"/repos/{repo.full_name}").respond(
+            status_code=200,
+            json={"id": repo.github_id, "name": "sample-repo", "full_name": repo.full_name},
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/commits").respond(
+            status_code=200,
+            json=[],
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/pulls").respond(
+            status_code=200,
+            json=[
+                {
+                    "number": 101,
+                    "title": "feat: new dashboard UI",
+                    "body": "Implements modern dashboard",
+                    "state": "open",
+                    "user": {"login": "charliedev"},
+                    "created_at": "2026-10-02T12:00:00Z",
+                    "base": {"ref": "main"},
+                    "head": {"ref": "feature/dashboard"},
+                }
+            ],
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/pulls/101").respond(
+            status_code=200,
+            json={
+                "number": 101,
+                "additions": 150,
+                "deletions": 20,
+                "changed_files": 5,
+            },
+        )
+
+        await execute_repo_sync(repo_id=repo.id, db=fake_db)
+
+        prs = [p for p in fake_db.pulls_by_id.values() if p.repo_id == repo.id]
+        assert len(prs) == 1
+        pr = prs[0]
+        assert pr.number == 101
+        assert pr.title == "feat: new dashboard UI"
+        assert pr.state == "open"
+        assert pr.author_login == "charliedev"
+        assert pr.additions == 150
+        assert pr.deletions == 20
+        assert pr.changed_files == 5
+        assert pr.base_ref == "main"
+        assert pr.head_ref == "feature/dashboard"
+
+
+@pytest.mark.asyncio
+async def test_sync_pull_requests_stage_idempotency(
+    fake_db: InMemoryAsyncSession,
+    sync_fixtures: tuple[User, Repository, SyncJob],
+):
+    """Verify running PR sync twice is idempotent and does not create duplicates."""
+    user, repo, job = sync_fixtures
+
+    with respx.mock(base_url="https://api.github.com") as respx_mock:
+        respx_mock.get(path=f"/repos/{repo.full_name}").respond(
+            status_code=200,
+            json={"id": repo.github_id, "name": "sample-repo", "full_name": repo.full_name},
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/commits").respond(
+            status_code=200,
+            json=[],
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/pulls").respond(
+            status_code=200,
+            json=[
+                {
+                    "number": 202,
+                    "title": "fix: resolve memory leak",
+                    "state": "closed",
+                    "user": {"login": "danield"},
+                    "created_at": "2026-10-01T08:00:00Z",
+                    "merged_at": "2026-10-01T09:00:00Z",
+                    "closed_at": "2026-10-01T09:00:00Z",
+                }
+            ],
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/pulls/202").respond(
+            status_code=200,
+            json={
+                "number": 202,
+                "additions": 3,
+                "deletions": 1,
+                "changed_files": 1,
+            },
+        )
+
+        # Run 1
+        await execute_repo_sync(repo_id=repo.id, db=fake_db)
+        count_first = len([p for p in fake_db.pulls_by_id.values() if p.repo_id == repo.id])
+        assert count_first == 1
+
+        # Run 2
+        await execute_repo_sync(repo_id=repo.id, db=fake_db)
+        count_second = len([p for p in fake_db.pulls_by_id.values() if p.repo_id == repo.id])
         assert count_second == 1
