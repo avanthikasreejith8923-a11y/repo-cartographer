@@ -67,6 +67,10 @@ async def test_sync_metadata_stage_success(
                 "private": False,
             },
         )
+        respx_mock.get(path=f"/repos/{repo.full_name}/commits").respond(
+            status_code=200,
+            json=[],
+        )
 
         await execute_repo_sync(repo_id=repo.id, db=fake_db)
 
@@ -105,3 +109,103 @@ async def test_sync_metadata_stage_failure_marks_failed(
         assert job.stage == "failed"
         assert job.error is not None
         assert job.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_commits_stage_ingestion_and_stats(
+    fake_db: InMemoryAsyncSession,
+    sync_fixtures: tuple[User, Repository, SyncJob],
+):
+    """Verify commits are ingested and stats fetched for recent commits."""
+    user, repo, job = sync_fixtures
+
+    with respx.mock(base_url="https://api.github.com") as respx_mock:
+        # Metadata route
+        respx_mock.get(path=f"/repos/{repo.full_name}").respond(
+            status_code=200,
+            json={"id": repo.github_id, "name": "sample-repo", "full_name": repo.full_name},
+        )
+        # Commits list route
+        respx_mock.get(path=f"/repos/{repo.full_name}/commits").respond(
+            status_code=200,
+            json=[
+                {
+                    "sha": "1111222233334444555566667777888899990000",
+                    "commit": {
+                        "message": "feat: initial feature commit",
+                        "author": {"name": "Alice Dev", "date": "2026-10-01T10:00:00Z"},
+                        "committer": {"date": "2026-10-01T10:00:00Z"},
+                    },
+                    "author": {"login": "alicedev"},
+                }
+            ],
+        )
+        # Commit stats route
+        respx_mock.get(path=f"/repos/{repo.full_name}/commits/1111222233334444555566667777888899990000").respond(
+            status_code=200,
+            json={
+                "sha": "1111222233334444555566667777888899990000",
+                "stats": {"additions": 42, "deletions": 5, "total": 47},
+                "files": [{}, {}],
+            },
+        )
+
+        await execute_repo_sync(repo_id=repo.id, db=fake_db)
+
+        commits = [c for c in fake_db.commits_by_id.values() if c.repo_id == repo.id]
+        assert len(commits) == 1
+        commit = commits[0]
+        assert commit.sha == "1111222233334444555566667777888899990000"
+        assert commit.author_login == "alicedev"
+        assert commit.author_name == "Alice Dev"
+        assert commit.message == "feat: initial feature commit"
+        assert commit.additions == 42
+        assert commit.deletions == 5
+        assert commit.files_changed == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_commits_stage_idempotency(
+    fake_db: InMemoryAsyncSession,
+    sync_fixtures: tuple[User, Repository, SyncJob],
+):
+    """Verify running commit sync twice is idempotent and does not create duplicate rows."""
+    user, repo, job = sync_fixtures
+
+    with respx.mock(base_url="https://api.github.com") as respx_mock:
+        respx_mock.get(path=f"/repos/{repo.full_name}").respond(
+            status_code=200,
+            json={"id": repo.github_id, "name": "sample-repo", "full_name": repo.full_name},
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/commits").respond(
+            status_code=200,
+            json=[
+                {
+                    "sha": "aabbccddeeff0011223344556677889900aabbcc",
+                    "commit": {
+                        "message": "fix: bugfix",
+                        "author": {"name": "Bob Dev", "date": "2026-10-02T10:00:00Z"},
+                        "committer": {"date": "2026-10-02T10:00:00Z"},
+                    },
+                    "author": {"login": "bobdev"},
+                }
+            ],
+        )
+        respx_mock.get(path=f"/repos/{repo.full_name}/commits/aabbccddeeff0011223344556677889900aabbcc").respond(
+            status_code=200,
+            json={
+                "sha": "aabbccddeeff0011223344556677889900aabbcc",
+                "stats": {"additions": 10, "deletions": 2, "total": 12},
+                "files": [{}],
+            },
+        )
+
+        # First sync run
+        await execute_repo_sync(repo_id=repo.id, db=fake_db)
+        count_first = len([c for c in fake_db.commits_by_id.values() if c.repo_id == repo.id])
+        assert count_first == 1
+
+        # Second sync run
+        await execute_repo_sync(repo_id=repo.id, db=fake_db)
+        count_second = len([c for c in fake_db.commits_by_id.values() if c.repo_id == repo.id])
+        assert count_second == 1

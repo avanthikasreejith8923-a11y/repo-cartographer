@@ -4,14 +4,27 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.logging import logger
+from app.models.commit import Commit
 from app.models.repository import Repository
 from app.models.sync_job import SyncJob
 from app.models.user import User
 from app.services.github_client import GitHubAPIError, GitHubClient
+
+
+def parse_github_datetime(date_str: str | None) -> datetime:
+    """Parse ISO 8601 GitHub datetime string to timezone-aware UTC datetime."""
+    if not date_str:
+        return datetime.now(UTC)
+    try:
+        return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+    except Exception:
+        return datetime.now(UTC)
 
 
 async def sync_metadata_stage(
@@ -31,6 +44,77 @@ async def sync_metadata_stage(
     repo.full_name = repo_data.get("full_name", repo.full_name)
     await db.flush()
     return repo_data
+
+
+async def sync_commits_stage(
+    repo: Repository,
+    client: GitHubClient,
+    db: AsyncSession,
+) -> int:
+    """Stage 2: Fetch and idempotently upsert commits with additions/deletions stats."""
+    owner, repo_name = repo.full_name.split("/", 1)
+    logger.info(f"Sync stage [commits]: Fetching commits for {owner}/{repo_name}")
+    raw_commits = await client.list_commits(
+        owner=owner,
+        repo=repo_name,
+        max_items=settings.SYNC_MAX_COMMITS,
+    )
+
+    upserted_count = 0
+    for idx, c in enumerate(raw_commits):
+        sha = c["sha"]
+        commit_meta = c.get("commit", {})
+        author_meta = c.get("author") or {}
+        committer_meta = commit_meta.get("committer") or {}
+        commit_author = commit_meta.get("author") or {}
+
+        date_str = committer_meta.get("date") or commit_author.get("date")
+        committed_at = parse_github_datetime(date_str)
+
+        additions: int | None = None
+        deletions: int | None = None
+        files_changed: int | None = None
+
+        # Fetch per-item stats only for the most recent N commits to protect rate limits
+        if idx < settings.SYNC_STATS_COMMITS_LIMIT:
+            try:
+                detail = await client.get_commit(owner=owner, repo=repo_name, sha=sha)
+                stats = detail.get("stats", {})
+                additions = stats.get("additions")
+                deletions = stats.get("deletions")
+                files_changed = len(detail.get("files", [])) or stats.get("total")
+            except Exception as e:
+                logger.debug(f"Could not fetch stats for commit {sha[:7]}: {e}")
+
+        insert_stmt = insert(Commit).values(
+            repo_id=repo.id,
+            sha=sha,
+            author_login=author_meta.get("login"),
+            author_name=commit_author.get("name"),
+            message=commit_meta.get("message", ""),
+            committed_at=committed_at,
+            additions=additions,
+            deletions=deletions,
+            files_changed=files_changed,
+        )
+        upsert_stmt = insert_stmt.on_conflict_do_update(
+            index_elements=["repo_id", "sha"],
+            set_={
+                "author_login": insert_stmt.excluded.author_login,
+                "author_name": insert_stmt.excluded.author_name,
+                "message": insert_stmt.excluded.message,
+                "committed_at": insert_stmt.excluded.committed_at,
+                "additions": insert_stmt.excluded.additions,
+                "deletions": insert_stmt.excluded.deletions,
+                "files_changed": insert_stmt.excluded.files_changed,
+                "updated_at": func.now(),
+            },
+        )
+        await db.execute(upsert_stmt)
+        upserted_count += 1
+
+    await db.flush()
+    return upserted_count
 
 
 async def execute_repo_sync(repo_id: str | uuid.UUID, db: AsyncSession) -> None:
@@ -93,8 +177,16 @@ async def execute_repo_sync(repo_id: str | uuid.UUID, db: AsyncSession) -> None:
         sync_job.progress = 25
         await db.commit()
 
-        # Placeholders for stages 2, 3, 4 (implemented in subsequent commits)
-        # Marking ready after metadata stage for Commit 9
+        # Stage 2: Commits
+        sync_job.stage = "commits"
+        sync_job.progress = 30
+        await db.commit()
+
+        await sync_commits_stage(repo=repo, client=client, db=db)
+        sync_job.progress = 50
+        await db.commit()
+
+        # Placeholders for stages 3, 4 (implemented in subsequent commits)
         repo.status = "ready"
         repo.last_synced_at = datetime.now(UTC)
         repo.sync_error = None

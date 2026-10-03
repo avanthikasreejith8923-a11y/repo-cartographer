@@ -80,6 +80,109 @@ class InMemoryAsyncSession:
             except Exception:
                 pass
 
+        # Handle INSERT ON CONFLICT DO UPDATE
+        if "INSERT INTO" in stmt_str:
+            if "commits" in stmt_str:
+                repo_id = params.get("repo_id")
+                sha = params.get("sha")
+                existing = next(
+                    (c for c in self.commits_by_id.values() if c.repo_id == repo_id and c.sha == sha),
+                    None,
+                )
+                if existing:
+                    existing.author_login = params.get("author_login", existing.author_login)
+                    existing.author_name = params.get("author_name", existing.author_name)
+                    existing.message = params.get("message", existing.message)
+                    existing.committed_at = params.get("committed_at", existing.committed_at)
+                    existing.additions = params.get("additions", existing.additions)
+                    existing.deletions = params.get("deletions", existing.deletions)
+                    existing.files_changed = params.get("files_changed", existing.files_changed)
+                else:
+                    new_commit = Commit(
+                        id=uuid.uuid4(),
+                        repo_id=repo_id,
+                        sha=sha,
+                        author_login=params.get("author_login"),
+                        author_name=params.get("author_name"),
+                        message=params.get("message", ""),
+                        committed_at=params.get("committed_at", datetime.now(UTC)),
+                        additions=params.get("additions"),
+                        deletions=params.get("deletions"),
+                        files_changed=params.get("files_changed"),
+                    )
+                    self.add(new_commit)
+                return FakeScalarResult(None)
+
+            if "pull_requests" in stmt_str:
+                repo_id = params.get("repo_id")
+                number = params.get("number")
+                existing = next(
+                    (p for p in self.pulls_by_id.values() if p.repo_id == repo_id and p.number == number),
+                    None,
+                )
+                if existing:
+                    existing.title = params.get("title", existing.title)
+                    existing.body = params.get("body", existing.body)
+                    existing.state = params.get("state", existing.state)
+                    existing.author_login = params.get("author_login", existing.author_login)
+                    existing.merged_at = params.get("merged_at", existing.merged_at)
+                    existing.closed_at = params.get("closed_at", existing.closed_at)
+                    existing.additions = params.get("additions", existing.additions)
+                    existing.deletions = params.get("deletions", existing.deletions)
+                    existing.changed_files = params.get("changed_files", existing.changed_files)
+                    existing.base_ref = params.get("base_ref", existing.base_ref)
+                    existing.head_ref = params.get("head_ref", existing.head_ref)
+                else:
+                    new_pr = PullRequest(
+                        id=uuid.uuid4(),
+                        repo_id=repo_id,
+                        number=number,
+                        title=params.get("title", ""),
+                        body=params.get("body"),
+                        state=params.get("state", "open"),
+                        author_login=params.get("author_login"),
+                        created_at=params.get("created_at", datetime.now(UTC)),
+                        merged_at=params.get("merged_at"),
+                        closed_at=params.get("closed_at"),
+                        additions=params.get("additions"),
+                        deletions=params.get("deletions"),
+                        changed_files=params.get("changed_files"),
+                        base_ref=params.get("base_ref"),
+                        head_ref=params.get("head_ref"),
+                    )
+                    self.add(new_pr)
+                return FakeScalarResult(None)
+
+            if "issues" in stmt_str:
+                repo_id = params.get("repo_id")
+                number = params.get("number")
+                existing = next(
+                    (i for i in self.issues_by_id.values() if i.repo_id == repo_id and i.number == number),
+                    None,
+                )
+                if existing:
+                    existing.title = params.get("title", existing.title)
+                    existing.body = params.get("body", existing.body)
+                    existing.state = params.get("state", existing.state)
+                    existing.labels = params.get("labels", existing.labels)
+                    existing.author_login = params.get("author_login", existing.author_login)
+                    existing.closed_at = params.get("closed_at", existing.closed_at)
+                else:
+                    new_issue = Issue(
+                        id=uuid.uuid4(),
+                        repo_id=repo_id,
+                        number=number,
+                        title=params.get("title", ""),
+                        body=params.get("body"),
+                        state=params.get("state", "open"),
+                        labels=params.get("labels", []),
+                        author_login=params.get("author_login"),
+                        created_at=params.get("created_at", datetime.now(UTC)),
+                        closed_at=params.get("closed_at"),
+                    )
+                    self.add(new_issue)
+                return FakeScalarResult(None)
+
         # Repositories queries
         if "repositories" in stmt_str:
             if "repositories.github_id" in stmt_str and "SELECT repositories.github_id" in stmt_str:
