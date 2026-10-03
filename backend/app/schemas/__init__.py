@@ -1,5 +1,19 @@
-"""Pydantic schemas package."""
+"""Schemas package."""
 
-from app.schemas.user import TokenPayload, UserInDB, UserRead
+from app.schemas.repository import (
+    AvailableRepoResponse,
+    RepoImportRequest,
+    RepoImportResponse,
+    RepoResponse,
+    SyncJobResponse,
+)
+from app.schemas.user import UserRead
 
-__all__ = ["UserRead", "UserInDB", "TokenPayload"]
+__all__ = [
+    "AvailableRepoResponse",
+    "RepoImportRequest",
+    "RepoImportResponse",
+    "RepoResponse",
+    "SyncJobResponse",
+    "UserRead",
+]

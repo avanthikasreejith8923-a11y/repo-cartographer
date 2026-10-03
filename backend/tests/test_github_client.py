@@ -1,6 +1,7 @@
 """Unit and integration tests for GitHubClient with respx mocks."""
 
 from datetime import UTC, datetime
+
 import httpx
 import pytest
 import respx
