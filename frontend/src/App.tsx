@@ -38,7 +38,7 @@ export const App: React.FC = () => {
           <div className="brand">
             <div className="brand-icon">RC</div>
             <span className="brand-title">repo-cartographer</span>
-            <span className="brand-badge">Phase 1 / 6</span>
+            <span className="brand-badge">Phase 2 / 6</span>
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
@@ -81,7 +81,7 @@ export const App: React.FC = () => {
             color: "var(--text-muted)",
           }}
         >
-          repo-cartographer &copy; 2026 &bull; AI Developer Productivity Platform &bull; Phase 1: Foundation + GitHub OAuth
+          repo-cartographer &copy; 2026 &bull; AI Developer Productivity Platform &bull; Phase 2: Repository Ingestion &amp; Async Sync
         </footer>
       </div>
     </AuthProvider>
