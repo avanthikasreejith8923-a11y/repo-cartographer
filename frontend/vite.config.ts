@@ -13,6 +13,11 @@ export default defineConfig({
         changeOrigin: true,
         secure: false,
       },
+      "/repos": {
+        target: process.env.VITE_BACKEND_PROXY_URL || "http://localhost:8000",
+        changeOrigin: true,
+        secure: false,
+      },
       "/health": {
         target: process.env.VITE_BACKEND_PROXY_URL || "http://localhost:8000",
         changeOrigin: true,

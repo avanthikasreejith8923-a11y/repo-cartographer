@@ -150,3 +150,70 @@ async def logout(response: Response) -> AuthStatusResponse:
         authenticated=False,
         message="Session successfully terminated.",
     )
+
+
+@router.get("/demo-login", summary="One-Click Demo Mode Login (Redirect)")
+async def demo_login_redirect() -> RedirectResponse:
+    """Issue session cookie for pre-seeded demo user and redirect to frontend."""
+    from app.db.demo_store import DEMO_USER_ID, get_demo_session
+
+    store = get_demo_session()
+    user = store.users_by_id.get(DEMO_USER_ID)
+    if not user:
+        from app.db.demo_store import seed_demo_data
+
+        seed_demo_data(store)
+        user = store.users_by_id[DEMO_USER_ID]
+
+    token_payload = {
+        "sub": str(user.id),
+        "github_id": user.github_id,
+        "login": user.login,
+    }
+    session_jwt = create_session_token(token_payload)
+    max_age_seconds = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+
+    redirect_resp = RedirectResponse(url=f"{settings.FRONTEND_URL}/", status_code=status.HTTP_302_FOUND)
+    redirect_resp.set_cookie(
+        key=settings.SESSION_COOKIE_NAME,
+        value=session_jwt,
+        max_age=max_age_seconds,
+        httponly=True,
+        samesite="lax",
+        secure=settings.is_production,
+        path="/",
+    )
+    return redirect_resp
+
+
+@router.post("/demo-login", response_model=UserRead, summary="One-Click Demo Mode Login (JSON)")
+async def demo_login_json(response: Response) -> UserRead:
+    """Issue session cookie for pre-seeded demo user and return user profile."""
+    from app.db.demo_store import DEMO_USER_ID, get_demo_session
+
+    store = get_demo_session()
+    user = store.users_by_id.get(DEMO_USER_ID)
+    if not user:
+        from app.db.demo_store import seed_demo_data
+
+        seed_demo_data(store)
+        user = store.users_by_id[DEMO_USER_ID]
+
+    token_payload = {
+        "sub": str(user.id),
+        "github_id": user.github_id,
+        "login": user.login,
+    }
+    session_jwt = create_session_token(token_payload)
+    max_age_seconds = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+
+    response.set_cookie(
+        key=settings.SESSION_COOKIE_NAME,
+        value=session_jwt,
+        max_age=max_age_seconds,
+        httponly=True,
+        samesite="lax",
+        secure=settings.is_production,
+        path="/",
+    )
+    return UserRead.model_validate(user)

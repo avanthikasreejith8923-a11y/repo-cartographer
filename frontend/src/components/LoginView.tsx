@@ -8,6 +8,20 @@ export const LoginView: React.FC = () => {
   const params = new URLSearchParams(window.location.search);
   const errorParam = params.get("error");
 
+  const handleDemoLogin = async () => {
+    try {
+      const res = await fetch("/auth/demo-login", {
+        method: "POST",
+        credentials: "include",
+      });
+      if (res.ok) {
+        window.location.reload();
+      }
+    } catch (err) {
+      console.error("Demo login error:", err);
+    }
+  };
+
   return (
     <div
       style={{
@@ -111,7 +125,29 @@ export const LoginView: React.FC = () => {
           </div>
         )}
 
-        <div style={{ margin: "2rem 0" }}>
+        <div style={{ margin: "1.75rem 0", display: "flex", flexDirection: "column", gap: "0.85rem" }}>
+          <button
+            onClick={handleDemoLogin}
+            id="demo-login-button"
+            className="btn btn-primary"
+            style={{
+              width: "100%",
+              padding: "0.85rem 1.25rem",
+              fontSize: "0.95rem",
+              background: "linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "0.6rem",
+              boxShadow: "0 4px 14px rgba(99, 102, 241, 0.4)",
+            }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+            </svg>
+            Explore Interactive Demo (One-Click)
+          </button>
+
           <button
             onClick={login}
             id="github-login-button"
@@ -119,7 +155,7 @@ export const LoginView: React.FC = () => {
             style={{
               width: "100%",
               padding: "0.85rem 1.25rem",
-              fontSize: "1rem",
+              fontSize: "0.95rem",
             }}
           >
             {/* GitHub Octocat Icon */}

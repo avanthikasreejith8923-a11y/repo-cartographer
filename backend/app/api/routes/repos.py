@@ -43,6 +43,88 @@ async def list_available_repos(
     db: AsyncSession = Depends(get_db),
 ) -> list[AvailableRepoResponse]:
     """Fetch user's repositories from GitHub and flag whether each is already imported."""
+    from app.core.config import settings
+    from app.core.security import decrypt_token
+
+    is_demo_user = False
+    try:
+        raw_token = decrypt_token(current_user.encrypted_access_token)
+        is_demo_user = raw_token.startswith("ghp_demo_")
+    except Exception:
+        pass
+
+    if settings.DEMO_MODE and is_demo_user:
+        stmt = select(Repository.github_id).where(Repository.user_id == current_user.id)
+        result = await db.execute(stmt)
+        imported_github_ids = set(result.scalars().all())
+
+        demo_available = [
+            {
+                "id": 89230101,
+                "name": "repo-cartographer",
+                "full_name": "avanthikasreejith8923-a11y/repo-cartographer",
+                "description": "AI Developer Productivity Platform: Codebase Graphing, Ingestion, and RAG with Citations",
+                "private": False,
+                "html_url": "https://github.com/avanthikasreejith8923-a11y/repo-cartographer",
+                "default_branch": "main",
+                "language": "TypeScript",
+            },
+            {
+                "id": 89230102,
+                "name": "fastapi",
+                "full_name": "fastapi/fastapi",
+                "description": "FastAPI framework, high performance, easy to learn, fast to code, ready for production",
+                "private": False,
+                "html_url": "https://github.com/fastapi/fastapi",
+                "default_branch": "master",
+                "language": "Python",
+            },
+            {
+                "id": 89230103,
+                "name": "react",
+                "full_name": "facebook/react",
+                "description": "The library for web and native user interfaces.",
+                "private": False,
+                "html_url": "https://github.com/facebook/react",
+                "default_branch": "main",
+                "language": "JavaScript",
+            },
+            {
+                "id": 89230104,
+                "name": "flask",
+                "full_name": "pallets/flask",
+                "description": "The Python micro framework for building web applications.",
+                "private": False,
+                "html_url": "https://github.com/pallets/flask",
+                "default_branch": "main",
+                "language": "Python",
+            },
+            {
+                "id": 89230105,
+                "name": "transformers",
+                "full_name": "huggingface/transformers",
+                "description": "State-of-the-art Machine Learning for Pytorch, TensorFlow, and JAX.",
+                "private": False,
+                "html_url": "https://github.com/huggingface/transformers",
+                "default_branch": "main",
+                "language": "Python",
+            },
+        ]
+        return [
+            AvailableRepoResponse(
+                github_id=r["id"],
+                name=r["name"],
+                full_name=r["full_name"],
+                description=r["description"],
+                is_private=r["private"],
+                html_url=r["html_url"],
+                default_branch=r["default_branch"],
+                language=r["language"],
+                is_imported=r["id"] in imported_github_ids,
+            )
+            for r in demo_available
+        ]
+
     client = GitHubClient(encrypted_token=current_user.encrypted_access_token)
     try:
         gh_repos = await client.list_user_repos(per_page=per_page, max_items=page * per_page)
@@ -93,21 +175,46 @@ async def import_repository(
     db: AsyncSession = Depends(get_db),
 ) -> RepoImportResponse:
     """Import a GitHub repository by full_name ('owner/repo') and enqueue a sync job."""
-    owner, repo_name = payload.full_name.split("/", 1)
-    client = GitHubClient(encrypted_token=current_user.encrypted_access_token)
+    from app.core.config import settings
+    from app.core.security import decrypt_token
 
+    is_demo_user = False
     try:
-        repo_data = await client.get_repo(owner=owner, repo=repo_name)
-    except GitHubAPIError as exc:
-        if exc.status_code == 404:
+        raw_token = decrypt_token(current_user.encrypted_access_token)
+        is_demo_user = raw_token.startswith("ghp_demo_")
+    except Exception:
+        pass
+
+    if settings.DEMO_MODE and is_demo_user:
+        descriptions = {
+            "facebook/react": "The library for web and native user interfaces.",
+            "pallets/flask": "The Python micro framework for building web applications.",
+            "huggingface/transformers": "State-of-the-art Machine Learning for Pytorch, TensorFlow, and JAX.",
+        }
+        repo_data = {
+            "id": abs(hash(payload.full_name)) % 100000000 + 1000,
+            "full_name": payload.full_name,
+            "description": descriptions.get(payload.full_name, f"Imported demo repository: {payload.full_name}"),
+            "default_branch": "main",
+            "language": "JavaScript" if "react" in payload.full_name else "Python",
+            "private": False,
+        }
+    else:
+        owner, repo_name = payload.full_name.split("/", 1)
+        client = GitHubClient(encrypted_token=current_user.encrypted_access_token)
+
+        try:
+            repo_data = await client.get_repo(owner=owner, repo=repo_name)
+        except GitHubAPIError as exc:
+            if exc.status_code == 404:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Repository '{payload.full_name}' was not found on GitHub or you lack access.",
+                ) from exc
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Repository '{payload.full_name}' was not found on GitHub or you lack access.",
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to fetch repository from GitHub: {exc}",
             ) from exc
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to fetch repository from GitHub: {exc}",
-        ) from exc
 
     github_id = repo_data["id"]
 

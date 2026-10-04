@@ -158,3 +158,13 @@ async def test_auth_logout(client: httpx.AsyncClient) -> None:
     data = response.json()
     assert data["authenticated"] is False
     assert "terminated" in data["message"]
+
+
+@pytest.mark.asyncio
+async def test_auth_demo_login(client: httpx.AsyncClient) -> None:
+    """Verify POST /auth/demo-login sets session cookie and returns demo user."""
+    response = await client.post("/auth/demo-login")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["login"] == "avanthikasreejith8923-a11y"
+    assert "rc_session" in response.cookies or settings.SESSION_COOKIE_NAME in response.cookies
