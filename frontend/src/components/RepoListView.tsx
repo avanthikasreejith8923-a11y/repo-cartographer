@@ -199,23 +199,39 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
                   >
                     {repo.full_name}
                   </h3>
-                  <span
-                    className={`badge badge-${
-                      repo.status === "ready"
-                        ? "success"
-                        : repo.status === "failed"
-                        ? "danger"
-                        : "warning"
-                    }`}
-                    style={{ fontSize: "0.72rem", flexShrink: 0 }}
-                  >
+                  <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
+                    {repo.index_status && repo.index_status !== "none" && (
+                      <span
+                        className={`badge badge-${
+                          repo.index_status === "ready"
+                            ? "success"
+                            : repo.index_status === "failed"
+                            ? "danger"
+                            : "warning"
+                        }`}
+                        style={{ fontSize: "0.72rem", flexShrink: 0 }}
+                      >
+                        {repo.index_status === "ready" ? "Indexed" : repo.index_status === "indexing" ? "Indexing..." : "Index Failed"}
+                      </span>
+                    )}
                     <span
-                      className={`badge-dot ${
-                        repo.status === "syncing" || repo.status === "pending" ? "pulse-dot" : ""
+                      className={`badge badge-${
+                        repo.status === "ready"
+                          ? "success"
+                          : repo.status === "failed"
+                          ? "danger"
+                          : "warning"
                       }`}
-                    />
-                    {repo.status}
-                  </span>
+                      style={{ fontSize: "0.72rem", flexShrink: 0 }}
+                    >
+                      <span
+                        className={`badge-dot ${
+                          repo.status === "syncing" || repo.status === "pending" ? "pulse-dot" : ""
+                        }`}
+                      />
+                      {repo.status}
+                    </span>
+                  </div>
                 </div>
 
                 <p

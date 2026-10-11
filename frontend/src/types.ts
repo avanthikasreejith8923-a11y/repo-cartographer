@@ -29,8 +29,40 @@ export interface Repository {
   status: "pending" | "syncing" | "ready" | "failed";
   last_synced_at: string | null;
   sync_error: string | null;
+  index_status?: "none" | "indexing" | "ready" | "failed";
+  indexed_commit_sha?: string | null;
+  indexed_at?: string | null;
+  chunk_count?: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface IndexJob {
+  id: string;
+  repo_id: string;
+  status: "pending" | "running" | "completed" | "failed";
+  stage: string;
+  progress: number;
+  error: string | null;
+  stats?: Record<string, any>;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+}
+
+export type SearchMode = "hybrid" | "semantic" | "keyword";
+
+export interface SearchResultItem {
+  id: string;
+  path: string;
+  start_line: number;
+  end_line: number;
+  language: string | null;
+  symbol: string | null;
+  kind: string;
+  score: number;
+  snippet: string;
+  permalink: string;
 }
 
 export interface AvailableRepo {
