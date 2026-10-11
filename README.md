@@ -112,66 +112,61 @@ Copy `.env.example` to `.env` and configure the following variables:
 
 ---
 
-## 🛠️ Local Quickstart with Docker Compose
+## 💻 Quickstart (Run Without Docker - Default)
 
 ### 1. Prerequisites
-- Docker Engine & Docker Compose (or Docker Desktop)
-- A GitHub OAuth App configured at [GitHub Developer Settings](https://github.com/settings/developers) with:
+- **Python 3.11+** and **Node.js 18+**
+- **Hosted PostgreSQL with pgvector** (e.g. [Neon](https://neon.tech))
+- **Hosted Redis** (e.g. [Upstash](https://upstash.com) or Redis Cloud)
+- **GitHub OAuth App** configured at [GitHub Developer Settings](https://github.com/settings/developers) with:
   - **Homepage URL**: `http://localhost:5173`
   - **Authorization callback URL**: `http://localhost:8000/auth/github/callback`
 
 ### 2. Configure Environment
-```bash
-# Copy template and fill in your GitHub OAuth App credentials
-cp .env.example .env
+```powershell
+Copy-Item .env.example .env
+```
+Fill in `.env` with:
+- `DATABASE_URL`: Your Neon Postgres connection string (accepts Neon URL as copied, including `?sslmode=require&channel_binding=require`)
+- `TEST_DATABASE_URL`: Separate Neon branch for isolated integration tests
+- `REDIS_URL`: Your Redis connection string (`redis://` or `rediss://`)
+- `GITHUB_CLIENT_ID` & `GITHUB_CLIENT_SECRET`: From your GitHub OAuth app
+- `GEMINI_API_KEY`: Google Gemini API key for embeddings
+
+Verify your environment and connectivity with the doctor script:
+```powershell
+& backend/.venv/Scripts/python.exe scripts/doctor.py
 ```
 
-To generate a new Fernet encryption key:
-```bash
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+### 3. Apply Migrations
+```powershell
+.\scripts\dev-migrate.ps1
 ```
 
-### 3. Start Services
-```bash
-docker compose up --build
-```
-
-The services will initialize:
-- **Frontend**: [http://localhost:5173](http://localhost:5173)
-- **Backend API**: [http://localhost:8000](http://localhost:8000)
-- **Interactive OpenAPI Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
-- **PostgreSQL (pgvector)**: `localhost:5432`
-- **Redis**: `localhost:6379`
-
-Alembic migrations run automatically on container startup to enable the `vector` extension and create the `users` table.
+### 4. Run Services
+Run each of the following in separate PowerShell terminal windows:
+- **FastAPI Backend**:
+  ```powershell
+  .\scripts\dev-api.ps1
+  ```
+- **ARQ Background Worker**:
+  ```powershell
+  .\scripts\dev-worker.ps1
+  ```
+- **React Frontend**:
+  ```powershell
+  .\scripts\dev-frontend.ps1
+  ```
 
 ---
 
-## 💻 Manual Local Development (Without Docker)
+## 🛠️ Alternative: Docker Compose
 
-### Backend
+If running on Linux or Docker Desktop with WSL2:
 ```bash
-cd backend
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
-
-# Run Alembic migrations (requires Postgres running locally)
-alembic upgrade head
-
-# Start development server
-uvicorn app.main:app --reload --port 8000
-
-# Start ARQ background worker (in separate terminal)
-arq app.worker.WorkerSettings
+docker compose up --build
 ```
-
-### Frontend
-```bash
-cd frontend
-npm install
-npm run dev
-```
+The services will initialize on ports 5173 (Frontend), 8000 (API), 5432 (Postgres + pgvector), and 6379 (Redis).
 
 ---
 
