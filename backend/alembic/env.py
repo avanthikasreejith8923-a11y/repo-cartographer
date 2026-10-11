@@ -1,5 +1,6 @@
 import asyncio
 from logging.config import fileConfig
+from typing import Any
 
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
@@ -21,13 +22,17 @@ target_metadata = Base.metadata
 
 
 def get_url() -> str:
-    """Retrieve async database URL from application settings."""
+    """Retrieve async database URL from configuration or application settings."""
+    cfg_url = config.get_main_option("sqlalchemy.url")
+    if cfg_url and cfg_url.strip():
+        normalized = settings.normalize_asyncpg_dsn(cfg_url.strip())
+        return normalized or cfg_url.strip()
     return settings.DATABASE_URL
 
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
-    url = settings.sync_database_url
+    url = settings.normalize_sync_dsn(get_url()) or settings.sync_database_url
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -52,14 +57,25 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_async_migrations() -> None:
     """Run migrations in 'online' mode using async engine."""
+    url = get_url()
     configuration = config.get_section(config.config_ini_section) or {}
-    configuration["sqlalchemy.url"] = get_url()
+    configuration["sqlalchemy.url"] = url
+
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    connect_args: dict[str, Any] = {}
+    if parsed.hostname and "-pooler" in parsed.hostname.lower():
+        connect_args["statement_cache_size"] = 0
+        connect_args["prepared_statement_cache_size"] = 0
 
     connectable = async_engine_from_config(
         configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=connect_args,
     )
+
 
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

@@ -63,6 +63,10 @@ addopts = "-v --strict-markers"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "integration: marks integration tests that run against the isolated test database",
+]
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
+

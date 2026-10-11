@@ -5,9 +5,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.core.security import encrypt_token
+from app.models.code_chunk import CodeChunk
 from app.models.commit import Commit
+from app.models.index_job import IndexJob
 from app.models.issue import Issue
 from app.models.pull_request import PullRequest
+from app.models.repo_file import RepoFile
 from app.models.repository import Repository
 from app.models.sync_job import SyncJob
 from app.models.user import User
@@ -55,11 +58,34 @@ class DemoInMemorySession:
         self.users_by_github_id: dict[int, User] = {}
         self.repos_by_id: dict[uuid.UUID, Repository] = {}
         self.sync_jobs_by_id: dict[uuid.UUID, SyncJob] = {}
+        self.index_jobs_by_id: dict[uuid.UUID, IndexJob] = {}
+        self.repo_files_by_id: dict[uuid.UUID, RepoFile] = {}
+        self.code_chunks_by_id: dict[uuid.UUID, CodeChunk] = {}
         self.commits_by_id: dict[uuid.UUID, Commit] = {}
         self.pulls_by_id: dict[uuid.UUID, PullRequest] = {}
         self.issues_by_id: dict[uuid.UUID, Issue] = {}
         self.added: list[Any] = []
         self.deleted: list[Any] = []
+
+    async def get(self, entity_cls: Any, ident: Any) -> Any:
+        if isinstance(ident, str):
+            try:
+                ident = uuid.UUID(ident)
+            except ValueError:
+                pass
+        if entity_cls is Repository:
+            return self.repos_by_id.get(ident)
+        if entity_cls is User:
+            return self.users_by_id.get(ident)
+        if entity_cls is IndexJob:
+            return self.index_jobs_by_id.get(ident)
+        if entity_cls is SyncJob:
+            return self.sync_jobs_by_id.get(ident)
+        if entity_cls is RepoFile:
+            return self.repo_files_by_id.get(ident)
+        if entity_cls is CodeChunk:
+            return self.code_chunks_by_id.get(ident)
+        return None
 
     async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> FakeScalarResult:
         stmt_str = str(statement)
@@ -283,6 +309,25 @@ class DemoInMemorySession:
             matched_issues.sort(key=lambda i: i.created_at, reverse=True)
             return FakeScalarResult(matched_issues[0] if matched_issues else None, items=matched_issues)
 
+        # IndexJobs queries
+        if "index_jobs" in stmt_str:
+            repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID)), None)
+            matched_jobs = [
+                j for j in self.index_jobs_by_id.values()
+                if repo_id is None or j.repo_id == repo_id
+            ]
+            matched_jobs.sort(key=lambda j: j.created_at, reverse=True)
+            return FakeScalarResult(matched_jobs[0] if matched_jobs else None, items=matched_jobs)
+
+        # CodeChunks queries
+        if "code_chunks" in stmt_str:
+            repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID)), None)
+            matched_chunks = [
+                c for c in self.code_chunks_by_id.values()
+                if repo_id is None or c.repo_id == repo_id
+            ]
+            return FakeScalarResult(matched_chunks[0] if matched_chunks else None, items=matched_chunks)
+
         # User queries
         where_part = stmt_str.split("WHERE", 1)[1] if "WHERE" in stmt_str else stmt_str
 
@@ -339,6 +384,30 @@ class DemoInMemorySession:
             if not instance.updated_at:
                 instance.updated_at = now
             self.sync_jobs_by_id[instance.id] = instance
+        elif isinstance(instance, IndexJob):
+            if not instance.id:
+                instance.id = uuid.uuid4()
+            if not instance.created_at:
+                instance.created_at = now
+            if not instance.updated_at:
+                instance.updated_at = now
+            self.index_jobs_by_id[instance.id] = instance
+        elif isinstance(instance, CodeChunk):
+            if not instance.id:
+                instance.id = uuid.uuid4()
+            if not instance.created_at:
+                instance.created_at = now
+            if not instance.updated_at:
+                instance.updated_at = now
+            self.code_chunks_by_id[instance.id] = instance
+        elif isinstance(instance, RepoFile):
+            if not instance.id:
+                instance.id = uuid.uuid4()
+            if not instance.created_at:
+                instance.created_at = now
+            if not instance.updated_at:
+                instance.updated_at = now
+            self.repo_files_by_id[instance.id] = instance
         elif isinstance(instance, Commit):
             if not instance.id:
                 instance.id = uuid.uuid4()
@@ -365,13 +434,17 @@ class DemoInMemorySession:
     async def delete(self, instance: Any) -> None:
         if isinstance(instance, Repository) and instance.id in self.repos_by_id:
             del self.repos_by_id[instance.id]
-            # Also cascade delete commits, PRs, issues, sync jobs
+            # Also cascade delete commits, PRs, issues, sync jobs, index jobs, chunks, files
             self.commits_by_id = {k: v for k, v in self.commits_by_id.items() if v.repo_id != instance.id}
             self.pulls_by_id = {k: v for k, v in self.pulls_by_id.items() if v.repo_id != instance.id}
             self.issues_by_id = {k: v for k, v in self.issues_by_id.items() if v.repo_id != instance.id}
             self.sync_jobs_by_id = {k: v for k, v in self.sync_jobs_by_id.items() if v.repo_id != instance.id}
+            self.index_jobs_by_id = {k: v for k, v in self.index_jobs_by_id.items() if v.repo_id != instance.id}
+            self.code_chunks_by_id = {k: v for k, v in self.code_chunks_by_id.items() if v.repo_id != instance.id}
+            self.repo_files_by_id = {k: v for k, v in self.repo_files_by_id.items() if v.repo_id != instance.id}
         elif isinstance(instance, User) and instance.id in self.users_by_id:
             del self.users_by_id[instance.id]
+
         self.deleted.append(instance)
 
     async def flush(self) -> None:
