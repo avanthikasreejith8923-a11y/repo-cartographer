@@ -213,9 +213,10 @@ async def sync_issues_stage(
 
     upserted_count = 0
     for item in raw_items:
-        # Filter out items containing a `pull_request` key
-        if "pull_request" in item:
+        # Filter out items containing a truthy `pull_request` object
+        if bool(item.get("pull_request")):
             continue
+
 
         number = item["number"]
         author_meta = item.get("user") or {}

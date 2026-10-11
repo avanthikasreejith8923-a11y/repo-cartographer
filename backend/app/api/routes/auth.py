@@ -155,6 +155,11 @@ async def logout(response: Response) -> AuthStatusResponse:
 @router.get("/demo-login", summary="One-Click Demo Mode Login (Redirect)")
 async def demo_login_redirect() -> RedirectResponse:
     """Issue session cookie for pre-seeded demo user and redirect to frontend."""
+    if not settings.DEMO_MODE:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Demo mode is disabled.",
+        )
     from app.db.demo_store import DEMO_USER_ID, get_demo_session
 
     store = get_demo_session()
@@ -189,6 +194,11 @@ async def demo_login_redirect() -> RedirectResponse:
 @router.post("/demo-login", response_model=UserRead, summary="One-Click Demo Mode Login (JSON)")
 async def demo_login_json(response: Response) -> UserRead:
     """Issue session cookie for pre-seeded demo user and return user profile."""
+    if not settings.DEMO_MODE:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Demo mode is disabled.",
+        )
     from app.db.demo_store import DEMO_USER_ID, get_demo_session
 
     store = get_demo_session()

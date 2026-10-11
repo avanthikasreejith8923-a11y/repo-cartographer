@@ -1,9 +1,14 @@
-"""ARQ background worker configuration and lifecycle handlers."""
-
+import sys
 from typing import Any
 
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+
 from arq.connections import RedisSettings
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import settings
 from app.core.logging import logger, setup_logging
@@ -19,24 +24,27 @@ async def sync_repository(ctx: dict[str, Any], repo_id: str) -> None:
         await execute_repo_sync(repo_id=repo_id, db=db)
 
 
+async def index_repository(ctx: dict[str, Any], repo_id: str, job_id: str | None = None) -> None:
+    """Entrypoint function for ARQ background codebase indexing tasks."""
+    from app.services.indexer import execute_repo_indexing
+
+    logger.info(f"Worker received index_repository job for repo {repo_id} (job_id: {job_id})")
+    session_factory: async_sessionmaker[AsyncSession] = ctx["session_factory"]
+    async with session_factory() as db:
+        await execute_repo_indexing(repo_id=repo_id, db=db, job_id=job_id)
+
+
 async def startup(ctx: dict[str, Any]) -> None:
     """Worker startup hook: initializes async database engine and session maker."""
     setup_logging()
     logger.info("ARQ Worker starting up; initializing database session factory...")
-    engine = create_async_engine(
-        settings.DATABASE_URL,
-        echo=False,
-        pool_pre_ping=True,
-    )
-    session_factory = async_sessionmaker(
-        bind=engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-        autocommit=False,
-        autoflush=False,
-    )
+    from app.db.session import async_session_maker, engine, verify_db_connection
+
+    # Ensure DB connection with backoff retry for Neon cold starts
+    await verify_db_connection()
+
     ctx["engine"] = engine
-    ctx["session_factory"] = session_factory
+    ctx["session_factory"] = async_session_maker
     logger.info("ARQ Worker initialization complete.")
 
 
@@ -52,9 +60,10 @@ async def shutdown(ctx: dict[str, Any]) -> None:
 class WorkerSettings:
     """ARQ Worker process settings."""
 
-    functions = [sync_repository]
+    functions = [sync_repository, index_repository]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
+    poll_delay = settings.ARQ_POLL_DELAY
     max_jobs = 10
-    job_timeout = 600  # 10 minutes max per sync run
+    job_timeout = 1800  # 30 minutes max per indexing / sync run

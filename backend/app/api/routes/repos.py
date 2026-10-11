@@ -1,7 +1,7 @@
 """API routes for repository discovery, import, and management."""
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.commit import Commit
+from app.models.index_job import IndexJob
 from app.models.issue import Issue
 from app.models.pull_request import PullRequest
 from app.models.repository import Repository
@@ -17,16 +18,20 @@ from app.models.sync_job import SyncJob
 from app.models.user import User
 from app.schemas.repository import (
     AvailableRepoResponse,
+    CodeSearchRequest,
     CommitResponse,
+    IndexJobResponse,
     IssueResponse,
     PullRequestResponse,
     RepoImportRequest,
     RepoImportResponse,
     RepoResponse,
+    SearchResultResponse,
     SyncJobResponse,
 )
 from app.services.github_client import GitHubAPIError, GitHubClient
-from app.services.queue import enqueue_sync_job
+from app.services.queue import enqueue_index_job, enqueue_sync_job
+from app.services.search import execute_code_search
 
 router = APIRouter()
 
@@ -537,3 +542,147 @@ async def list_repo_issues(
     res = await db.execute(query)
     issues = res.scalars().all()
     return [IssueResponse.model_validate(i) for i in issues]
+
+
+@router.post(
+    "/{repo_id}/index",
+    response_model=IndexJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Trigger codebase indexing for a repository",
+)
+async def trigger_repo_indexing(
+    repo_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> IndexJobResponse:
+    """Enqueues a background indexing task for the specified repository."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    if repo.index_status == "indexing":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Repository is currently being indexed",
+        )
+
+    job = IndexJob(
+        id=uuid.uuid4(),
+        repo_id=repo.id,
+        status="running",
+        stage="queued",
+        progress=0,
+        stats={},
+        started_at=datetime.now(UTC),
+    )
+    repo.index_status = "indexing"
+    db.add(job)
+    db.add(repo)
+    await db.commit()
+    await db.refresh(job)
+
+    await enqueue_index_job(repo.id, job.id)
+    return IndexJobResponse.model_validate(job)
+
+
+@router.get(
+    "/{repo_id}/index-status",
+    response_model=IndexJobResponse,
+    summary="Get latest codebase indexing status for a repository",
+)
+async def get_repo_indexing_status(
+    repo_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> IndexJobResponse:
+    """Returns the latest indexing job status for the specified repository."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    job_stmt = (
+        select(IndexJob)
+        .where(IndexJob.repo_id == repo.id)
+        .order_by(IndexJob.created_at.desc())
+    )
+    job_res = await db.execute(job_stmt)
+    index_job = job_res.scalars().first()
+    if not index_job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No indexing job found for repository",
+        )
+
+    return IndexJobResponse.model_validate(index_job)
+
+
+@router.post(
+    "/{repo_id}/search",
+    response_model=list[SearchResultResponse],
+    summary="Search codebase using hybrid, semantic, or keyword search",
+)
+async def search_repo_codebase(
+    repo_id: uuid.UUID,
+    search_req: CodeSearchRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[SearchResultResponse]:
+    """Execute code search across indexed repository code chunks."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    if repo.index_status != "ready":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Repository codebase has not been indexed yet. Please trigger indexing before searching.",
+        )
+
+    results = await execute_code_search(
+        repo=repo,
+        query=search_req.query,
+        mode=search_req.mode,  # type: ignore[arg-type]
+        limit=search_req.limit,
+        db=db,
+    )
+
+    return [
+        SearchResultResponse(
+            id=r.id,
+            path=r.path,
+            start_line=r.start_line,
+            end_line=r.end_line,
+            language=r.language,
+            symbol=r.symbol,
+            kind=r.kind,
+            score=r.score,
+            snippet=r.snippet,
+            permalink=r.permalink,
+        )
+        for r in results
+    ]
+

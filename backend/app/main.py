@@ -10,15 +10,23 @@ from fastapi.responses import JSONResponse
 from app.api.routes import api_router
 from app.core.config import settings
 from app.core.logging import logger, setup_logging
+from app.db.session import verify_db_connection
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan context for startup and graceful shutdown."""
     setup_logging()
-    logger.info(f"Starting repo-cartographer backend [Environment: {settings.ENVIRONMENT}]")
-    logger.info(f"Database target: {settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}")
-    logger.info(f"Redis target: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
+    if settings.DEMO_MODE:
+        logger.warning("=" * 70)
+        logger.warning("!!! WARNING: DEMO MODE IS ENABLED !!!")
+        logger.warning("Live database and Redis are bypassed with in-memory stores.")
+        logger.warning("=" * 70)
+    else:
+        logger.info(f"Starting repo-cartographer backend [Environment: {settings.ENVIRONMENT}]")
+        logger.info(f"Database target: {settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}")
+        logger.info(f"Redis target: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
+        await verify_db_connection()
     yield
     logger.info("Shutting down repo-cartographer backend services...")
 
