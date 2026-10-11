@@ -12,9 +12,12 @@ import pytest_asyncio
 
 from app.db.session import get_db, get_redis
 from app.main import app
+from app.models.code_chunk import CodeChunk
 from app.models.commit import Commit
+from app.models.index_job import IndexJob
 from app.models.issue import Issue
 from app.models.pull_request import PullRequest
+from app.models.repo_file import RepoFile
 from app.models.repository import Repository
 from app.models.sync_job import SyncJob
 from app.models.user import User
@@ -58,6 +61,9 @@ class InMemoryAsyncSession:
         self.users_by_github_id: dict[int, User] = {}
         self.repos_by_id: dict[uuid.UUID, Repository] = {}
         self.sync_jobs_by_id: dict[uuid.UUID, SyncJob] = {}
+        self.index_jobs_by_id: dict[uuid.UUID, IndexJob] = {}
+        self.repo_files_by_id: dict[uuid.UUID, RepoFile] = {}
+        self.code_chunks_by_id: dict[uuid.UUID, CodeChunk] = {}
         self.commits_by_id: dict[uuid.UUID, Commit] = {}
         self.pulls_by_id: dict[uuid.UUID, PullRequest] = {}
         self.issues_by_id: dict[uuid.UUID, Issue] = {}
@@ -238,6 +244,28 @@ class InMemoryAsyncSession:
             matched_jobs.sort(key=lambda j: j.created_at, reverse=True)
             return FakeScalarResult(matched_jobs[0] if matched_jobs else None, items=matched_jobs)
 
+        # IndexJobs queries
+        if "index_jobs" in stmt_str:
+            repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID)), None)
+            matched_jobs = [
+                j for j in self.index_jobs_by_id.values()
+                if repo_id is None or j.repo_id == repo_id
+            ]
+            matched_jobs.sort(key=lambda j: j.created_at, reverse=True)
+            return FakeScalarResult(matched_jobs[0] if matched_jobs else None, items=matched_jobs)
+
+        # CodeChunks queries
+        if "code_chunks" in stmt_str:
+            repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID)), None)
+            matched_chunks = [
+                c for c in self.code_chunks_by_id.values()
+                if repo_id is None or c.repo_id == repo_id
+            ]
+            # If query is checking count
+            if "count(" in stmt_str.lower():
+                return FakeScalarResult(len(matched_chunks))
+            return FakeScalarResult(matched_chunks[0] if matched_chunks else None, items=matched_chunks)
+
         # Commits queries
         if "commits" in stmt_str:
             repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID)), None)
@@ -344,6 +372,30 @@ class InMemoryAsyncSession:
             if not instance.updated_at:
                 instance.updated_at = now
             self.sync_jobs_by_id[instance.id] = instance
+        elif isinstance(instance, IndexJob):
+            if not instance.id:
+                instance.id = uuid.uuid4()
+            if not instance.created_at:
+                instance.created_at = now
+            if not instance.updated_at:
+                instance.updated_at = now
+            self.index_jobs_by_id[instance.id] = instance
+        elif isinstance(instance, CodeChunk):
+            if not instance.id:
+                instance.id = uuid.uuid4()
+            if not instance.created_at:
+                instance.created_at = now
+            if not instance.updated_at:
+                instance.updated_at = now
+            self.code_chunks_by_id[instance.id] = instance
+        elif isinstance(instance, RepoFile):
+            if not instance.id:
+                instance.id = uuid.uuid4()
+            if not instance.created_at:
+                instance.created_at = now
+            if not instance.updated_at:
+                instance.updated_at = now
+            self.repo_files_by_id[instance.id] = instance
         elif isinstance(instance, Commit):
             if not instance.id:
                 instance.id = uuid.uuid4()
@@ -373,6 +425,9 @@ class InMemoryAsyncSession:
         elif isinstance(instance, User) and instance.id in self.users_by_id:
             del self.users_by_id[instance.id]
         self.deleted.append(instance)
+
+    async def refresh(self, instance: Any) -> None:
+        pass
 
     async def flush(self) -> None:
         pass
@@ -418,3 +473,59 @@ async def client(fake_db: InMemoryAsyncSession, fake_redis: AsyncMock) -> AsyncG
         yield test_client
 
     app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def test_db_session():
+    """Provide a real AsyncSession connected to TEST_DATABASE_URL with strict safety guard."""
+    from pgvector.asyncpg import register_vector
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    from app.core.config import settings
+
+    test_url = settings.validate_test_database_url()
+    engine = create_async_engine(
+        test_url,
+        echo=False,
+        connect_args=settings.asyncpg_connect_args,
+    )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def on_connect(dbapi_connection, connection_record):
+        if hasattr(dbapi_connection, "run_async"):
+            dbapi_connection.run_async(register_vector)
+
+    session_maker = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
+    async with session_maker() as session:
+        yield session
+
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def integration_client(
+    test_db_session,
+    fake_redis: AsyncMock,
+) -> AsyncGenerator[httpx.AsyncClient, None]:
+    """Test HTTP client wired to the real TEST_DATABASE_URL session."""
+    async def override_get_db():
+        yield test_db_session
+
+    async def override_get_redis():
+        return fake_redis
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_redis] = override_get_redis
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as test_client:
+        yield test_client
+
+    app.dependency_overrides.clear()
+

@@ -161,8 +161,21 @@ async def test_auth_logout(client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_auth_demo_login(client: httpx.AsyncClient) -> None:
-    """Verify POST /auth/demo-login sets session cookie and returns demo user."""
+async def test_auth_demo_login_disabled_by_default(client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify demo-login returns 404 when DEMO_MODE is False (cannot bypass GitHub login)."""
+    monkeypatch.setattr(settings, "DEMO_MODE", False)
+    response = await client.post("/auth/demo-login")
+    assert response.status_code == 404
+    assert "Demo mode is disabled" in response.json()["detail"]
+
+    get_response = await client.get("/auth/demo-login", follow_redirects=False)
+    assert get_response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_auth_demo_login_when_opted_in(client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify demo-login issues cookie and returns profile only when DEMO_MODE is explicitly True."""
+    monkeypatch.setattr(settings, "DEMO_MODE", True)
     response = await client.post("/auth/demo-login")
     assert response.status_code == 200
     data = response.json()

@@ -474,3 +474,128 @@ async def test_list_repo_pulls_and_issues(
     assert res_closed_issues.status_code == 200
     assert len(res_closed_issues.json()) == 1
     assert res_closed_issues.json()[0]["number"] == 20
+
+
+@pytest.mark.asyncio
+async def test_trigger_repo_indexing_and_status(
+    client: httpx.AsyncClient,
+    fake_db: InMemoryAsyncSession,
+    monkeypatch,
+):
+    """POST /repos/{id}/index triggers indexing job and updates repo status."""
+    from unittest.mock import AsyncMock
+
+    user, cookies = create_authenticated_user(fake_db)
+    repo = Repository(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        github_id=501,
+        full_name="testuser/repo-to-index",
+        status="ready",
+        index_status="none",
+    )
+    fake_db.add(repo)
+
+    # 1. Unauthenticated -> 401
+    res_unauth = await client.post(f"/repos/{repo.id}/index")
+    assert res_unauth.status_code == 401
+
+    # 2. Unknown repo -> 404
+    res_404 = await client.post(f"/repos/{uuid.uuid4()}/index", cookies=cookies)
+    assert res_404.status_code == 404
+
+    # 3. Successful trigger -> 202
+    monkeypatch.setattr("app.api.routes.repos.enqueue_index_job", AsyncMock(return_value="arq-job-123"))
+
+    res_trigger = await client.post(f"/repos/{repo.id}/index", cookies=cookies)
+    assert res_trigger.status_code == 202
+    data = res_trigger.json()
+    assert data["repo_id"] == str(repo.id)
+    assert data["status"] == "running"
+    assert data["stage"] == "queued"
+    assert repo.index_status == "indexing"
+
+    # 4. Already indexing -> 409 Conflict
+    res_conflict = await client.post(f"/repos/{repo.id}/index", cookies=cookies)
+    assert res_conflict.status_code == 409
+
+    # 5. GET /repos/{id}/index-status -> 200
+    res_status = await client.get(f"/repos/{repo.id}/index-status", cookies=cookies)
+    assert res_status.status_code == 200
+    status_data = res_status.json()
+    assert status_data["repo_id"] == str(repo.id)
+    assert status_data["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_search_repo_codebase_validation_and_results(
+    client: httpx.AsyncClient,
+    fake_db: InMemoryAsyncSession,
+    monkeypatch,
+):
+    """POST /repos/{id}/search validates status and returns search results."""
+    from unittest.mock import AsyncMock
+
+    from app.services.search import SearchResultItem
+
+    user, cookies = create_authenticated_user(fake_db)
+    repo = Repository(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        github_id=601,
+        full_name="testuser/repo-searchable",
+        status="ready",
+        index_status="none",
+    )
+    fake_db.add(repo)
+
+    # 1. Repo not indexed -> 409 Conflict
+    res_not_ready = await client.post(
+        f"/repos/{repo.id}/search",
+        json={"query": "test query", "mode": "hybrid"},
+        cookies=cookies,
+    )
+    assert res_not_ready.status_code == 409
+    assert "not been indexed yet" in res_not_ready.json()["detail"]
+
+    # 2. Empty query -> 422 Unprocessable Entity
+    repo.index_status = "ready"
+    res_empty_q = await client.post(
+        f"/repos/{repo.id}/search",
+        json={"query": "", "mode": "hybrid"},
+        cookies=cookies,
+    )
+    assert res_empty_q.status_code == 422
+
+    # 3. Successful search
+    mock_item = SearchResultItem(
+        id=uuid.uuid4(),
+        path="src/main.py",
+        start_line=10,
+        end_line=25,
+        language="python",
+        symbol="main_service",
+        kind="function",
+        score=0.032,
+        snippet="def main_service(): pass",
+        permalink="https://github.com/testuser/repo-searchable/blob/main/src/main.py#L10-L25",
+    )
+    monkeypatch.setattr(
+        "app.api.routes.repos.execute_code_search",
+        AsyncMock(return_value=[mock_item]),
+    )
+
+    res_search = await client.post(
+        f"/repos/{repo.id}/search",
+        json={"query": "main service", "mode": "hybrid", "limit": 5},
+        cookies=cookies,
+    )
+    assert res_search.status_code == 200
+    results = res_search.json()
+    assert len(results) == 1
+    assert results[0]["path"] == "src/main.py"
+    assert results[0]["symbol"] == "main_service"
+    assert results[0]["start_line"] == 10
+    assert results[0]["end_line"] == 25
+    assert results[0]["permalink"] == "https://github.com/testuser/repo-searchable/blob/main/src/main.py#L10-L25"
+
