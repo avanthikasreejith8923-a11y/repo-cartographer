@@ -53,8 +53,23 @@ class RepoResponse(BaseModel):
     status: str
     last_synced_at: datetime | None = None
     sync_error: str | None = None
+    index_status: str = "none"
+    indexed_commit_sha: str | None = None
+    indexed_at: datetime | None = None
+    chunk_count: int = 0
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("index_status", mode="before")
+    @classmethod
+    def default_index_status(cls, v: Any) -> str:
+        return v if v is not None else "none"
+
+    @field_validator("chunk_count", mode="before")
+    @classmethod
+    def default_chunk_count(cls, v: Any) -> int:
+        return v if v is not None else 0
+
 
 
 class SyncJobResponse(BaseModel):
@@ -135,4 +150,53 @@ class IssueResponse(BaseModel):
     author_login: str | None = None
     created_at: datetime
     closed_at: datetime | None = None
+
+
+class IndexJobResponse(BaseModel):
+    """Schema for indexing job status and progress."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    repo_id: uuid.UUID
+    status: str
+    stage: str
+    progress: int
+    error: str | None = None
+    stats: dict[str, Any] = Field(default_factory=dict)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime
+
+    @field_validator("stats", mode="before")
+    @classmethod
+    def default_stats(cls, v: Any) -> dict[str, Any]:
+        return v if v is not None else {}
+
+
+class CodeSearchRequest(BaseModel):
+    """Schema for code search request."""
+
+    query: str = Field(..., min_length=1, description="Code or natural language search query")
+    mode: str = Field(
+        default="hybrid",
+        pattern="^(hybrid|semantic|keyword)$",
+        description="Search mode: hybrid, semantic, keyword",
+    )
+    limit: int = Field(default=10, ge=1, le=50, description="Max results to return")
+
+
+class SearchResultResponse(BaseModel):
+    """Schema for individual search result item."""
+
+    id: uuid.UUID
+    path: str
+    start_line: int
+    end_line: int
+    language: str | None = None
+    symbol: str | None = None
+    kind: str
+    score: float
+    snippet: str
+    permalink: str
 

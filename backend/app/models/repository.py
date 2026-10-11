@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     BigInteger,
@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -20,9 +21,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
+    from app.models.code_chunk import CodeChunk
     from app.models.commit import Commit
+    from app.models.index_job import IndexJob
     from app.models.issue import Issue
     from app.models.pull_request import PullRequest
+    from app.models.repo_file import RepoFile
     from app.models.sync_job import SyncJob
     from app.models.user import User
 
@@ -89,6 +93,28 @@ class Repository(Base, TimestampMixin):
         Text,
         nullable=True,
     )
+    # Phase 3 Indexing attributes
+    index_status: Mapped[str] = mapped_column(
+        String(50),
+        default="none",
+        server_default="none",
+        nullable=False,
+        index=True,
+    )  # none | indexing | ready | failed
+    indexed_commit_sha: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+    indexed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    chunk_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="repositories")
@@ -116,6 +142,28 @@ class Repository(Base, TimestampMixin):
         cascade="all, delete-orphan",
         order_by="desc(SyncJob.created_at)",
     )
+    files: Mapped[list["RepoFile"]] = relationship(
+        "RepoFile",
+        back_populates="repository",
+        cascade="all, delete-orphan",
+    )
+    chunks: Mapped[list["CodeChunk"]] = relationship(
+        "CodeChunk",
+        back_populates="repository",
+        cascade="all, delete-orphan",
+    )
+    index_jobs: Mapped[list["IndexJob"]] = relationship(
+        "IndexJob",
+        back_populates="repository",
+        cascade="all, delete-orphan",
+        order_by="desc(IndexJob.created_at)",
+    )
+
+    def __init__(self, **kw: Any) -> None:
+        kw.setdefault("index_status", "none")
+        kw.setdefault("chunk_count", 0)
+        super().__init__(**kw)
 
     def __repr__(self) -> str:
-        return f"<Repository full_name={self.full_name} status={self.status}>"
+        return f"<Repository full_name={self.full_name} status={self.status} index_status={self.index_status}>"
+
