@@ -10,13 +10,16 @@ import {
   SyncJob,
 } from "../types";
 
+import { AskTab } from "./AskTab";
+import { DocsTab } from "./DocsTab";
+
 interface RepoDetailViewProps {
   repo: Repository;
   onBack: () => void;
   onResync: (repoId: string) => void;
 }
 
-type TabType = "commits" | "pulls" | "issues" | "search";
+type TabType = "commits" | "pulls" | "issues" | "search" | "ask" | "docs";
 
 export const RepoDetailView: React.FC<RepoDetailViewProps> = ({
   repo,
@@ -519,6 +522,18 @@ export const RepoDetailView: React.FC<RepoDetailViewProps> = ({
           onClick={() => setActiveTab("search")}
         >
           Code Search
+        </button>
+        <button
+          className={`tab-btn ${activeTab === "ask" ? "active" : ""}`}
+          onClick={() => setActiveTab("ask")}
+        >
+          💬 Ask Q&A
+        </button>
+        <button
+          className={`tab-btn ${activeTab === "docs" ? "active" : ""}`}
+          onClick={() => setActiveTab("docs")}
+        >
+          📚 Documentation
         </button>
       </div>
 
@@ -1154,6 +1169,16 @@ export const RepoDetailView: React.FC<RepoDetailViewProps> = ({
             </div>
           )}
         </div>
+      )}
+
+      {/* Tab 5: Codebase Q&A */}
+      {activeTab === "ask" && (
+        <AskTab repo={currentRepo} onNavigateToIndex={() => setActiveTab("search")} />
+      )}
+
+      {/* Tab 6: Architecture & README Documentation */}
+      {activeTab === "docs" && (
+        <DocsTab repo={currentRepo} onNavigateToIndex={() => setActiveTab("search")} />
       )}
     </div>
   );

@@ -141,3 +141,54 @@ export interface Issue {
   closed_at: string | null;
 }
 
+export interface SourceCitation {
+  marker: string;
+  path: string;
+  start_line: number;
+  end_line: number;
+  symbol: string | null;
+  language: string | null;
+  snippet: string;
+  permalink: string;
+}
+
+export interface AskQuestionResponse {
+  answer: string;
+  status: "ok" | "insufficient_evidence" | "error";
+  citations_missing: boolean;
+  sources: SourceCitation[];
+  history_id: string | null;
+  latency_ms: number;
+}
+
+export interface QAHistoryItem {
+  id: string;
+  repo_id: string;
+  user_id: string;
+  question: string;
+  answer: string;
+  citations: SourceCitation[];
+  status: "ok" | "insufficient_evidence" | "error";
+  model: string;
+  indexed_commit_sha: string | null;
+  latency_ms: number;
+  created_at: string;
+}
+
+export interface DocResponse {
+  id: string | null;
+  repo_id: string;
+  doc_type: "architecture" | "readme";
+  status: "not_started" | "pending" | "generating" | "ready" | "failed";
+  content_markdown: string | null;
+  citations: SourceCitation[];
+  error: string | null;
+  model: string | null;
+  indexed_commit_sha: string | null;
+  is_stale: boolean;
+  generated_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+
