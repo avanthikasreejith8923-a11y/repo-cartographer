@@ -4,33 +4,42 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from redis import asyncio as aioredis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
-from app.db.session import get_db
+from app.db.session import get_db, get_redis
 from app.models.commit import Commit
 from app.models.index_job import IndexJob
 from app.models.issue import Issue
 from app.models.pull_request import PullRequest
+from app.models.qa_history import QAHistory
+from app.models.repo_doc import RepoDoc
 from app.models.repository import Repository
 from app.models.sync_job import SyncJob
 from app.models.user import User
 from app.schemas.repository import (
+    AskQuestionRequest,
+    AskQuestionResponse,
     AvailableRepoResponse,
     CodeSearchRequest,
     CommitResponse,
+    DocResponse,
     IndexJobResponse,
     IssueResponse,
     PullRequestResponse,
+    QAHistoryResponse,
     RepoImportRequest,
     RepoImportResponse,
     RepoResponse,
     SearchResultResponse,
+    SourceCitationResponse,
     SyncJobResponse,
 )
 from app.services.github_client import GitHubAPIError, GitHubClient
-from app.services.queue import enqueue_index_job, enqueue_sync_job
+from app.services.qa import ask_codebase
+from app.services.queue import enqueue_doc_job, enqueue_index_job, enqueue_sync_job
 from app.services.search import execute_code_search
 
 router = APIRouter()
@@ -685,4 +694,283 @@ async def search_repo_codebase(
         )
         for r in results
     ]
+
+
+@router.post(
+    "/{repo_id}/ask",
+    response_model=AskQuestionResponse,
+    summary="Ask a question about the repository codebase",
+)
+async def ask_repo_question(
+    repo_id: uuid.UUID,
+    ask_req: AskQuestionRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+) -> AskQuestionResponse:
+    """Execute cited question answering grounded in codebase chunks."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    if repo.index_status != "ready":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Repository codebase has not been indexed yet. Please trigger indexing before asking questions.",
+        )
+
+    result = await ask_codebase(
+        repo=repo,
+        user=current_user,
+        question=ask_req.question,
+        db=db,
+        redis_client=redis,
+    )
+
+    return AskQuestionResponse(
+        answer=result.answer,
+        status=result.status,
+        citations_missing=result.citations_missing,
+        sources=[
+            SourceCitationResponse(
+                marker=s["marker"],
+                path=s["path"],
+                start_line=s["start_line"],
+                end_line=s["end_line"],
+                symbol=s.get("symbol"),
+                language=s.get("language"),
+                snippet=s["snippet"],
+                permalink=s["permalink"],
+            )
+            for s in result.sources
+        ],
+        history_id=result.history_id,
+        latency_ms=result.latency_ms,
+    )
+
+
+@router.get(
+    "/{repo_id}/ask/history",
+    response_model=list[QAHistoryResponse],
+    summary="List question answering history for repository",
+)
+async def list_repo_qa_history(
+    repo_id: uuid.UUID,
+    limit: int = Query(20, ge=1, le=100, description="Max history items"),
+    offset: int = Query(0, ge=0, description="Offset items"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[QAHistoryResponse]:
+    """Retrieve historical question-answering sessions for repository."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    hist_stmt = (
+        select(QAHistory)
+        .where(
+            QAHistory.repo_id == repo.id,
+            QAHistory.user_id == current_user.id,
+        )
+        .order_by(QAHistory.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    hist_res = await db.execute(hist_stmt)
+    records = hist_res.scalars().all()
+    return [QAHistoryResponse.model_validate(r) for r in records]
+
+
+@router.delete(
+    "/{repo_id}/ask/history/{history_id}",
+    summary="Delete a question answering history entry",
+)
+async def delete_repo_qa_history(
+    repo_id: uuid.UUID,
+    history_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, bool]:
+    """Delete an individual question answering history record."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    hist_stmt = select(QAHistory).where(
+        QAHistory.id == history_id,
+        QAHistory.repo_id == repo.id,
+        QAHistory.user_id == current_user.id,
+    )
+    hist_res = await db.execute(hist_stmt)
+    hist = hist_res.scalar_one_or_none()
+    if not hist:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="History entry not found",
+        )
+
+    await db.delete(hist)
+    await db.commit()
+    return {"deleted": True}
+
+
+@router.post(
+    "/{repo_id}/docs/{doc_type}/generate",
+    response_model=DocResponse,
+    summary="Trigger asynchronous documentation generation",
+)
+async def generate_repo_doc(
+    repo_id: uuid.UUID,
+    doc_type: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> DocResponse:
+    """Queue background documentation generation job for Architecture or README."""
+    norm_doc_type = doc_type.lower().strip()
+    if norm_doc_type not in ("architecture", "readme"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid doc_type: {doc_type}. Must be 'architecture' or 'readme'.",
+        )
+
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    if repo.index_status != "ready":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Repository codebase has not been indexed yet. Please trigger indexing before generating documentation.",
+        )
+
+    doc_stmt = select(RepoDoc).where(
+        RepoDoc.repo_id == repo.id,
+        RepoDoc.doc_type == norm_doc_type,
+    )
+    doc_res = await db.execute(doc_stmt)
+    doc = doc_res.scalar_one_or_none()
+
+    if doc and doc.status == "generating":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Documentation generation is already in progress.",
+        )
+
+    now = datetime.now(UTC)
+    if not doc:
+        doc = RepoDoc(
+            repo_id=repo.id,
+            doc_type=norm_doc_type,
+            status="pending",
+            content_markdown=None,
+            citations=[],
+            error=None,
+            model=None,
+            indexed_commit_sha=repo.indexed_commit_sha,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(doc)
+    else:
+        doc.status = "pending"
+        doc.error = None
+        doc.updated_at = now
+
+    await db.commit()
+    await db.refresh(doc)
+
+    await enqueue_doc_job(repo.id, norm_doc_type)
+
+    return DocResponse.model_validate(doc)
+
+
+@router.get(
+    "/{repo_id}/docs/{doc_type}",
+    response_model=DocResponse,
+    summary="Get generated documentation for repository",
+)
+async def get_repo_doc(
+    repo_id: uuid.UUID,
+    doc_type: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> DocResponse:
+    """Retrieve the generated Architecture or README documentation."""
+    norm_doc_type = doc_type.lower().strip()
+    if norm_doc_type not in ("architecture", "readme"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid doc_type: {doc_type}. Must be 'architecture' or 'readme'.",
+        )
+
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    doc_stmt = select(RepoDoc).where(
+        RepoDoc.repo_id == repo.id,
+        RepoDoc.doc_type == norm_doc_type,
+    )
+    doc_res = await db.execute(doc_stmt)
+    doc = doc_res.scalar_one_or_none()
+
+    if not doc:
+        return DocResponse(
+            repo_id=repo.id,
+            doc_type=norm_doc_type,
+            status="not_started",
+            content_markdown=None,
+            citations=[],
+            is_stale=False,
+        )
+
+    is_stale = bool(
+        repo.indexed_commit_sha
+        and doc.indexed_commit_sha
+        and doc.indexed_commit_sha != repo.indexed_commit_sha
+    )
+
+    doc_resp = DocResponse.model_validate(doc)
+    doc_resp.is_stale = is_stale
+    return doc_resp
 

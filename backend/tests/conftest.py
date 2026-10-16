@@ -17,6 +17,8 @@ from app.models.commit import Commit
 from app.models.index_job import IndexJob
 from app.models.issue import Issue
 from app.models.pull_request import PullRequest
+from app.models.qa_history import QAHistory
+from app.models.repo_doc import RepoDoc
 from app.models.repo_file import RepoFile
 from app.models.repository import Repository
 from app.models.sync_job import SyncJob
@@ -52,6 +54,9 @@ class FakeScalarResult:
     def scalars(self) -> FakeScalars:
         return FakeScalars(self._items)
 
+    def all(self) -> list[Any]:
+        return self._items
+
 
 class InMemoryAsyncSession:
     """Lightweight in-memory AsyncSession for isolated route and integration tests."""
@@ -67,6 +72,8 @@ class InMemoryAsyncSession:
         self.commits_by_id: dict[uuid.UUID, Commit] = {}
         self.pulls_by_id: dict[uuid.UUID, PullRequest] = {}
         self.issues_by_id: dict[uuid.UUID, Issue] = {}
+        self.qa_history_by_id: dict[uuid.UUID, QAHistory] = {}
+        self.repo_docs_by_id: dict[uuid.UUID, RepoDoc] = {}
         self.added: list[Any] = []
         self.deleted: list[Any] = []
 
@@ -316,6 +323,44 @@ class InMemoryAsyncSession:
             matched_issues.sort(key=lambda i: i.created_at, reverse=True)
             return FakeScalarResult(matched_issues[0] if matched_issues else None, items=matched_issues)
 
+        # RepoFiles queries
+        if "repo_files" in stmt_str:
+            repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID)), None)
+            matched_files = [
+                f for f in self.repo_files_by_id.values()
+                if repo_id is None or f.repo_id == repo_id
+            ]
+            if "repo_files.path" in stmt_str:
+                paths = [f.path for f in matched_files]
+                return FakeScalarResult(paths[0] if paths else None, items=paths)
+            return FakeScalarResult(matched_files[0] if matched_files else None, items=matched_files)
+
+        # QAHistory queries
+        if "qa_history" in stmt_str:
+            hist_id = next((v for v in params.values() if isinstance(v, uuid.UUID) and v in self.qa_history_by_id), None)
+            if hist_id:
+                h = self.qa_history_by_id.get(hist_id)
+                return FakeScalarResult(h, items=[h] if h else [])
+            repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID) and v in self.repos_by_id), None)
+            matched_hists = [
+                h for h in self.qa_history_by_id.values()
+                if repo_id is None or h.repo_id == repo_id
+            ]
+            matched_hists.sort(key=lambda h: h.created_at, reverse=True)
+            return FakeScalarResult(matched_hists[0] if matched_hists else None, items=matched_hists)
+
+        # RepoDocs queries
+        if "repo_docs" in stmt_str:
+            repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID) and v in self.repos_by_id), None)
+            doc_type = next((v for v in params.values() if isinstance(v, str) and v in ("architecture", "readme")), None)
+            matched_docs = [
+                d for d in self.repo_docs_by_id.values()
+                if (repo_id is None or d.repo_id == repo_id)
+                and (doc_type is None or d.doc_type == doc_type)
+            ]
+            doc = matched_docs[0] if matched_docs else None
+            return FakeScalarResult(doc, items=matched_docs)
+
         # User model queries
         where_part = stmt_str.split("WHERE", 1)[1] if "WHERE" in stmt_str else stmt_str
 
@@ -383,18 +428,14 @@ class InMemoryAsyncSession:
         elif isinstance(instance, CodeChunk):
             if not instance.id:
                 instance.id = uuid.uuid4()
-            if not instance.created_at:
-                instance.created_at = now
-            if not instance.updated_at:
-                instance.updated_at = now
+            if not getattr(instance, "indexed_at", None):
+                instance.indexed_at = now
             self.code_chunks_by_id[instance.id] = instance
         elif isinstance(instance, RepoFile):
             if not instance.id:
                 instance.id = uuid.uuid4()
-            if not instance.created_at:
-                instance.created_at = now
-            if not instance.updated_at:
-                instance.updated_at = now
+            if not getattr(instance, "indexed_at", None):
+                instance.indexed_at = now
             self.repo_files_by_id[instance.id] = instance
         elif isinstance(instance, Commit):
             if not instance.id:
@@ -416,6 +457,20 @@ class InMemoryAsyncSession:
             if not getattr(instance, "updated_at", None):
                 instance.updated_at = now
             self.issues_by_id[instance.id] = instance
+        elif isinstance(instance, QAHistory):
+            if not instance.id:
+                instance.id = uuid.uuid4()
+            if not instance.created_at:
+                instance.created_at = now
+            self.qa_history_by_id[instance.id] = instance
+        elif isinstance(instance, RepoDoc):
+            if not instance.id:
+                instance.id = uuid.uuid4()
+            if not instance.created_at:
+                instance.created_at = now
+            if not instance.updated_at:
+                instance.updated_at = now
+            self.repo_docs_by_id[instance.id] = instance
 
         self.added.append(instance)
 
@@ -424,6 +479,10 @@ class InMemoryAsyncSession:
             del self.repos_by_id[instance.id]
         elif isinstance(instance, User) and instance.id in self.users_by_id:
             del self.users_by_id[instance.id]
+        elif isinstance(instance, QAHistory) and instance.id in self.qa_history_by_id:
+            del self.qa_history_by_id[instance.id]
+        elif isinstance(instance, RepoDoc) and instance.id in self.repo_docs_by_id:
+            del self.repo_docs_by_id[instance.id]
         self.deleted.append(instance)
 
     async def refresh(self, instance: Any) -> None:
