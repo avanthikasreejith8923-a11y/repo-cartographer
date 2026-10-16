@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
+    from app.models.qa_history import QAHistory
     from app.models.repository import Repository
 
 
@@ -58,6 +59,12 @@ class User(Base, TimestampMixin):
         "Repository",
         back_populates="user",
         cascade="all, delete-orphan",
+    )
+    qa_histories: Mapped[list["QAHistory"]] = relationship(
+        "QAHistory",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        order_by="desc(QAHistory.created_at)",
     )
 
     def __repr__(self) -> str:

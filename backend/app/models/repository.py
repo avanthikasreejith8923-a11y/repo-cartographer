@@ -26,6 +26,8 @@ if TYPE_CHECKING:
     from app.models.index_job import IndexJob
     from app.models.issue import Issue
     from app.models.pull_request import PullRequest
+    from app.models.qa_history import QAHistory
+    from app.models.repo_doc import RepoDoc
     from app.models.repo_file import RepoFile
     from app.models.sync_job import SyncJob
     from app.models.user import User
@@ -157,6 +159,17 @@ class Repository(Base, TimestampMixin):
         back_populates="repository",
         cascade="all, delete-orphan",
         order_by="desc(IndexJob.created_at)",
+    )
+    qa_histories: Mapped[list["QAHistory"]] = relationship(
+        "QAHistory",
+        back_populates="repository",
+        cascade="all, delete-orphan",
+        order_by="desc(QAHistory.created_at)",
+    )
+    docs: Mapped[list["RepoDoc"]] = relationship(
+        "RepoDoc",
+        back_populates="repository",
+        cascade="all, delete-orphan",
     )
 
     def __init__(self, **kw: Any) -> None:
