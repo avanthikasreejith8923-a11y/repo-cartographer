@@ -192,3 +192,51 @@ async def enqueue_index_job(repo_id: uuid.UUID, job_id: uuid.UUID | None = None)
     except Exception as exc:
         logger.warning(f"Could not enqueue indexing job for repo {repo_id} to Redis: {exc}")
         return None
+
+
+async def simulate_demo_doc(repo_id: uuid.UUID, doc_type: str) -> None:
+    """Simulate asynchronous documentation generation in demo mode."""
+    from app.db.demo_store import get_demo_session
+    from app.services.doc_generator import execute_doc_generation
+    from app.services.llm import FakeLLMProvider
+
+    await asyncio.sleep(1.0)
+    db = get_demo_session()
+    try:
+        await execute_doc_generation(
+            repo_id=repo_id,
+            doc_type=doc_type,
+            db=db,
+            llm_provider=FakeLLMProvider(),
+        )
+    except Exception as exc:
+        logger.error(f"[Demo] Background doc generation failed for repo {repo_id}: {exc}")
+
+
+async def enqueue_doc_job(repo_id: uuid.UUID, doc_type: str) -> str | None:
+    """Enqueue repository documentation generation job to ARQ Redis queue.
+
+    Returns the ARQ job ID if enqueued, or None if queue is unavailable.
+    """
+    if settings.DEMO_MODE:
+        asyncio.create_task(simulate_demo_doc(repo_id, doc_type))
+        return f"demo-doc-job-{repo_id}-{doc_type}"
+
+    try:
+        from arq.connections import RedisSettings, create_pool
+
+        redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
+
+        async def _connect_and_enqueue() -> str | None:
+            pool = await create_pool(redis_settings)
+            job = await pool.enqueue_job("generate_doc", str(repo_id), doc_type)
+            await pool.close()
+            return job.job_id if job else None
+
+        arq_job_id = await asyncio.wait_for(_connect_and_enqueue(), timeout=5.0)
+        logger.info(f"Enqueued doc job for repo {repo_id} {doc_type} (ARQ Job ID: {arq_job_id})")
+        return arq_job_id
+    except Exception as exc:
+        logger.warning(f"Could not enqueue doc job for repo {repo_id} {doc_type} to Redis: {exc}")
+        return None
+

@@ -10,6 +10,8 @@ from app.models.commit import Commit
 from app.models.index_job import IndexJob
 from app.models.issue import Issue
 from app.models.pull_request import PullRequest
+from app.models.qa_history import QAHistory
+from app.models.repo_doc import RepoDoc
 from app.models.repo_file import RepoFile
 from app.models.repository import Repository
 from app.models.sync_job import SyncJob
@@ -49,6 +51,9 @@ class FakeScalarResult:
     def scalars(self) -> FakeScalars:
         return FakeScalars(self._items)
 
+    def all(self) -> list[Any]:
+        return self._items
+
 
 class DemoInMemorySession:
     """In-memory async database session simulating PostgreSQL for standalone demo execution."""
@@ -64,6 +69,8 @@ class DemoInMemorySession:
         self.commits_by_id: dict[uuid.UUID, Commit] = {}
         self.pulls_by_id: dict[uuid.UUID, PullRequest] = {}
         self.issues_by_id: dict[uuid.UUID, Issue] = {}
+        self.qa_history_by_id: dict[uuid.UUID, QAHistory] = {}
+        self.repo_docs_by_id: dict[uuid.UUID, RepoDoc] = {}
         self.added: list[Any] = []
         self.deleted: list[Any] = []
 
@@ -85,6 +92,10 @@ class DemoInMemorySession:
             return self.repo_files_by_id.get(ident)
         if entity_cls is CodeChunk:
             return self.code_chunks_by_id.get(ident)
+        if entity_cls is QAHistory:
+            return self.qa_history_by_id.get(ident)
+        if entity_cls is RepoDoc:
+            return self.repo_docs_by_id.get(ident)
         return None
 
     async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> FakeScalarResult:
@@ -326,7 +337,51 @@ class DemoInMemorySession:
                 c for c in self.code_chunks_by_id.values()
                 if repo_id is None or c.repo_id == repo_id
             ]
+            if "cosine_distance" in stmt_str or "distance" in stmt_str:
+                dist_items = [(c, 0.1) for c in matched_chunks]
+                return FakeScalarResult(dist_items[0] if dist_items else None, items=dist_items)
+            if "ts_rank" in stmt_str or "rank" in stmt_str:
+                rank_items = [(c, 0.9) for c in matched_chunks]
+                return FakeScalarResult(rank_items[0] if rank_items else None, items=rank_items)
             return FakeScalarResult(matched_chunks[0] if matched_chunks else None, items=matched_chunks)
+
+        # RepoFiles queries
+        if "repo_files" in stmt_str:
+            repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID)), None)
+            matched_files = [
+                f for f in self.repo_files_by_id.values()
+                if repo_id is None or f.repo_id == repo_id
+            ]
+            if stmt_str.strip().startswith("SELECT repo_files.path"):
+                paths = [f.path for f in matched_files]
+                return FakeScalarResult(paths[0] if paths else None, items=paths)
+            return FakeScalarResult(matched_files[0] if matched_files else None, items=matched_files)
+
+        # QAHistory queries
+        if "qa_history" in stmt_str:
+            hist_id = next((v for v in params.values() if isinstance(v, uuid.UUID) and v in self.qa_history_by_id), None)
+            if hist_id:
+                h = self.qa_history_by_id.get(hist_id)
+                return FakeScalarResult(h, items=[h] if h else [])
+            repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID) and v in self.repos_by_id), None)
+            matched_hists = [
+                h for h in self.qa_history_by_id.values()
+                if repo_id is None or h.repo_id == repo_id
+            ]
+            matched_hists.sort(key=lambda h: h.created_at, reverse=True)
+            return FakeScalarResult(matched_hists[0] if matched_hists else None, items=matched_hists)
+
+        # RepoDocs queries
+        if "repo_docs" in stmt_str:
+            repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID)), None)
+            doc_type = next((v for v in params.values() if isinstance(v, str) and v in ("architecture", "readme")), None)
+            matched_docs = [
+                d for d in self.repo_docs_by_id.values()
+                if (repo_id is None or d.repo_id == repo_id)
+                and (doc_type is None or d.doc_type == doc_type)
+            ]
+            doc = matched_docs[0] if matched_docs else None
+            return FakeScalarResult(doc, items=matched_docs)
 
         # User queries
         where_part = stmt_str.split("WHERE", 1)[1] if "WHERE" in stmt_str else stmt_str
@@ -395,18 +450,26 @@ class DemoInMemorySession:
         elif isinstance(instance, CodeChunk):
             if not instance.id:
                 instance.id = uuid.uuid4()
+            self.code_chunks_by_id[instance.id] = instance
+        elif isinstance(instance, QAHistory):
+            if not instance.id:
+                instance.id = uuid.uuid4()
             if not instance.created_at:
                 instance.created_at = now
-            if not instance.updated_at:
-                instance.updated_at = now
-            self.code_chunks_by_id[instance.id] = instance
-        elif isinstance(instance, RepoFile):
+            self.qa_history_by_id[instance.id] = instance
+        elif isinstance(instance, RepoDoc):
             if not instance.id:
                 instance.id = uuid.uuid4()
             if not instance.created_at:
                 instance.created_at = now
             if not instance.updated_at:
                 instance.updated_at = now
+            self.repo_docs_by_id[instance.id] = instance
+        elif isinstance(instance, RepoFile):
+            if not instance.id:
+                instance.id = uuid.uuid4()
+            if not getattr(instance, "indexed_at", None):
+                instance.indexed_at = now
             self.repo_files_by_id[instance.id] = instance
         elif isinstance(instance, Commit):
             if not instance.id:
@@ -419,12 +482,16 @@ class DemoInMemorySession:
         elif isinstance(instance, PullRequest):
             if not instance.id:
                 instance.id = uuid.uuid4()
+            if not getattr(instance, "created_at", None):
+                instance.created_at = now
             if not getattr(instance, "updated_at", None):
                 instance.updated_at = now
             self.pulls_by_id[instance.id] = instance
         elif isinstance(instance, Issue):
             if not instance.id:
                 instance.id = uuid.uuid4()
+            if not getattr(instance, "created_at", None):
+                instance.created_at = now
             if not getattr(instance, "updated_at", None):
                 instance.updated_at = now
             self.issues_by_id[instance.id] = instance
@@ -444,8 +511,15 @@ class DemoInMemorySession:
             self.repo_files_by_id = {k: v for k, v in self.repo_files_by_id.items() if v.repo_id != instance.id}
         elif isinstance(instance, User) and instance.id in self.users_by_id:
             del self.users_by_id[instance.id]
+        elif isinstance(instance, QAHistory) and instance.id in self.qa_history_by_id:
+            del self.qa_history_by_id[instance.id]
+        elif isinstance(instance, RepoDoc) and instance.id in self.repo_docs_by_id:
+            del self.repo_docs_by_id[instance.id]
 
         self.deleted.append(instance)
+
+    async def refresh(self, instance: Any) -> None:
+        pass
 
     async def flush(self) -> None:
         pass
@@ -463,13 +537,25 @@ class DemoInMemorySession:
 class FakeRedis:
     """Mock Redis client for standalone execution."""
 
+    def __init__(self) -> None:
+        self._data: dict[str, Any] = {}
+
     async def ping(self) -> bool:
         return True
 
     async def get(self, key: str) -> Any:
-        return None
+        return self._data.get(key)
 
     async def set(self, key: str, val: Any, *args: Any, **kwargs: Any) -> bool:
+        self._data[key] = val
+        return True
+
+    async def incr(self, key: str) -> int:
+        val = int(self._data.get(key, 0)) + 1
+        self._data[key] = val
+        return val
+
+    async def expire(self, key: str, seconds: int) -> bool:
         return True
 
 
@@ -514,6 +600,9 @@ def seed_demo_data(db: DemoInMemorySession) -> None:
         language="TypeScript",
         is_private=False,
         status="ready",
+        index_status="ready",
+        indexed_commit_sha="7ff268f9e58280471bd27b465dbacd7666a24864",
+        chunk_count=184,
         last_synced_at=now - timedelta(minutes=15),
     )
     db.add(repo1)
@@ -558,6 +647,40 @@ def seed_demo_data(db: DemoInMemorySession) -> None:
             files_changed=files,
         )
         db.add(c)
+
+    # RepoFiles & CodeChunks for repo1 (Phase 3 & Phase 4 Code Intelligence)
+    demo_files = [
+        ("backend/app/main.py", "FastAPI application entry point, lifecycle events, and route inclusion.\napp = FastAPI(title='Repo Cartographer', version='0.1.0')", "python", "app"),
+        ("backend/app/core/config.py", "class Settings(BaseSettings):\n    PROJECT_NAME: str = 'Repo Cartographer'\n    LLM_PROVIDER: str = 'gemini'\n    LLM_MODEL: str = 'gemini-3.5-flash-lite'", "python", "Settings"),
+        ("backend/app/services/qa.py", "async def ask_codebase(repo, user, question):\n    # Grounded codebase question answering with citation validation [S1]", "python", "ask_codebase"),
+        ("README.md", "# Repo Cartographer\nAI Developer Productivity Platform with pgvector hybrid search, grounded Q&A, and documentation generation.", "markdown", "README"),
+    ]
+    for path, content, lang, sym in demo_files:
+        rf = RepoFile(
+            id=uuid.uuid4(),
+            repo_id=DEMO_REPO_1_ID,
+            path=path,
+            size_bytes=len(content),
+            content_hash=f"hash_{path}",
+        )
+        db.add(rf)
+        chunk = CodeChunk(
+            id=uuid.uuid4(),
+            repo_id=DEMO_REPO_1_ID,
+            file_id=rf.id,
+            path=path,
+            chunk_index=0,
+            start_line=1,
+            end_line=30,
+            content=content,
+            content_hash=f"chunk_hash_{path}",
+            symbol=sym,
+            language=lang,
+            kind="definition" if sym != "README" else "document",
+            embedding=[0.01] * 768,
+            embedding_model="text-embedding-004",
+        )
+        db.add(chunk)
 
     # Pull Requests for repo1
     sample_prs = [

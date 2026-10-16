@@ -76,6 +76,18 @@ class Settings(BaseSettings):
     INDEX_MAX_CHUNKS: int = 4000
     INDEX_MAX_REPO_DOWNLOAD_MB: int = 100
 
+    # Phase 4: Codebase Q&A (RAG) & Architecture Documentation
+    LLM_PROVIDER: str = "gemini"  # gemini | fake
+    LLM_MODEL: str = "gemini-3.5-flash-lite"
+    LLM_TEMPERATURE: float = 0.2
+    LLM_MAX_OUTPUT_TOKENS: int = 2048
+    QA_TOP_K: int = 8
+    QA_MAX_CONTEXT_CHARS: int = 24000
+    QA_MAX_QUESTION_CHARS: int = 1000
+    QA_RATE_LIMIT_PER_MINUTE: int = 10
+    DOC_MAX_CONTEXT_CHARS: int = 40000
+    DOC_MAX_OUTPUT_TOKENS: int = 4096
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: str | list[str]) -> list[str]:

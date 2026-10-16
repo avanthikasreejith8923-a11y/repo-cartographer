@@ -200,3 +200,72 @@ class SearchResultResponse(BaseModel):
     snippet: str
     permalink: str
 
+
+class SourceCitationResponse(BaseModel):
+    """Schema for cited source chunk reference with deep link."""
+
+    marker: str
+    path: str
+    start_line: int
+    end_line: int
+    symbol: str | None = None
+    language: str | None = None
+    snippet: str
+    permalink: str
+
+
+class AskQuestionRequest(BaseModel):
+    """Schema for codebase Q&A request."""
+
+    question: str = Field(..., min_length=1, description="Question about the repository codebase")
+
+
+class AskQuestionResponse(BaseModel):
+    """Schema for codebase Q&A response with citations and metadata."""
+
+    answer: str
+    status: str
+    citations_missing: bool
+    sources: list[SourceCitationResponse]
+    history_id: uuid.UUID | None = None
+    latency_ms: int
+
+
+class QAHistoryResponse(BaseModel):
+    """Schema for persisted QAHistory records."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    repo_id: uuid.UUID
+    user_id: uuid.UUID
+    question: str
+    answer: str
+    citations: list[dict[str, Any]] | list[Any] = []
+    status: str
+    model: str
+    indexed_commit_sha: str | None = None
+    latency_ms: int
+    created_at: datetime
+
+
+class DocResponse(BaseModel):
+    """Schema for generated documentation status, content, citations, and staleness."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID | None = None
+    repo_id: uuid.UUID
+    doc_type: str
+    status: str
+    content_markdown: str | None = None
+    citations: list[dict[str, Any]] | list[Any] = []
+    error: str | None = None
+    model: str | None = None
+    indexed_commit_sha: str | None = None
+    is_stale: bool = False
+    generated_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+

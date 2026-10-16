@@ -92,7 +92,7 @@ async def check_database_and_vector(report: DoctorReport) -> None:
             try:
                 ver_res = await conn.execute(sa.text("SELECT version_num FROM alembic_version"))
                 versions = [r[0] for r in ver_res.fetchall()]
-                expected_head = "0003_code_intelligence"
+                expected_head = "0004_qa_and_documentation"
                 if expected_head in versions:
                     report.record("Alembic Migrations", True, f"Schema at head revision ({expected_head})")
                 else:
@@ -207,6 +207,30 @@ async def check_test_database(report: DoctorReport) -> None:
         await engine.dispose()
 
 
+async def check_llm(report: DoctorReport) -> None:
+    try:
+        from app.services.llm import get_llm_provider
+
+        provider = get_llm_provider()
+        res = await provider.generate(
+            system_prompt="You are a health probe.",
+            user_prompt="Say 'pong'",
+            max_output_tokens=10,
+            temperature=0.0,
+        )
+        if res and res.text:
+            provider_name = type(provider).__name__
+            report.record(
+                "LLM Provider",
+                True,
+                f"{provider_name} successfully generated response (model: {res.model})",
+            )
+        else:
+            report.record("LLM Provider", False, "LLM returned empty response")
+    except Exception as exc:  # noqa: BLE001
+        report.record("LLM Provider", False, f"LLM probe failed: {type(exc).__name__}: {exc}")
+
+
 async def run_doctor() -> bool:
     report = DoctorReport()
     await check_env_vars(report)
@@ -215,6 +239,7 @@ async def run_doctor() -> bool:
     await check_redis(report)
     await check_github_oauth(report)
     await check_embeddings(report)
+    await check_llm(report)
     return report.print_summary()
 
 
