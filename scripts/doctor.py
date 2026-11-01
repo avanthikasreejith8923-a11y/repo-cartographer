@@ -92,7 +92,7 @@ async def check_database_and_vector(report: DoctorReport) -> None:
             try:
                 ver_res = await conn.execute(sa.text("SELECT version_num FROM alembic_version"))
                 versions = [r[0] for r in ver_res.fetchall()]
-                expected_head = "0004_qa_and_documentation"
+                expected_head = "0005_intelligence_features"
                 if expected_head in versions:
                     report.record("Alembic Migrations", True, f"Schema at head revision ({expected_head})")
                 else:
@@ -129,6 +129,24 @@ async def check_redis(report: DoctorReport) -> None:
         await client.aclose()
     except Exception as exc:  # noqa: BLE001
         report.record("Redis Reachable", False, f"Connection failed: {type(exc).__name__}")
+
+
+async def check_worker(report: DoctorReport) -> None:
+    try:
+        from app.services.queue import worker_alive
+
+        alive = await worker_alive()
+        if alive:
+            report.record("ARQ Background Worker", True, "Worker is running (sentinel key active)")
+        else:
+            report.record(
+                "ARQ Background Worker",
+                True,
+                "Worker is not running (start with scripts\\dev-worker.ps1 when needed)",
+            )
+    except Exception as exc:  # noqa: BLE001
+        report.record("ARQ Background Worker", False, f"Could not check worker status: {exc}")
+
 
 
 async def check_github_oauth(report: DoctorReport) -> None:
@@ -237,6 +255,7 @@ async def run_doctor() -> bool:
     await check_database_and_vector(report)
     await check_test_database(report)
     await check_redis(report)
+    await check_worker(report)
     await check_github_oauth(report)
     await check_embeddings(report)
     await check_llm(report)
