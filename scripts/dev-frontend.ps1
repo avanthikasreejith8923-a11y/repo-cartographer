@@ -7,4 +7,4 @@ $FrontendDir = Join-Path $ProjectRoot "frontend"
 
 Write-Host "Starting Vite frontend server on http://localhost:5173..." -ForegroundColor Cyan
 Set-Location $FrontendDir
-npm run dev
+cmd.exe /c "npm run dev"
