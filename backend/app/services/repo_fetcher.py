@@ -21,6 +21,8 @@ BINARY_EXTENSIONS = {
     ".woff", ".woff2", ".ttf", ".eot", ".otf",
     ".pyc", ".pyo", ".pyd", ".class", ".jar", ".war",
     ".db", ".sqlite", ".sqlite3",
+    ".csv", ".tsv", ".parquet", ".pkl", ".pickle", ".h5", ".joblib",
+    ".npy", ".npz", ".feather", ".arrow",
 }
 
 LOCKFILES = {
@@ -235,24 +237,51 @@ def process_tar_archive(tar_bytes: bytes) -> list[FetchedFile]:
 async def fetch_repository_files(
     full_name: str,
     commit_sha: str,
-    encrypted_token: str,
+    encrypted_token: str | None = None,
 ) -> list[FetchedFile]:
     """Stream repository tarball from GitHub API and parse members in-memory."""
-    token = decrypt_token(encrypted_token)
+    token: str | None = None
+    if encrypted_token:
+        try:
+            token = decrypt_token(encrypted_token)
+        except Exception:
+            token = None
+
     url = f"https://api.github.com/repos/{full_name}/tarball/{commit_sha}"
     max_download_bytes = settings.INDEX_MAX_REPO_DOWNLOAD_MB * 1024 * 1024
 
     headers = {
-        "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "repo-cartographer",
     }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
 
     buffer = bytearray()
     async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
         try:
             async with client.stream("GET", url, headers=headers) as response:
+                if response.status_code == 401 and "Authorization" in headers:
+                    logger.warning(
+                        f"GitHub returned 401 downloading tarball for {full_name} with token. "
+                        "Retrying unauthenticated for public repository..."
+                    )
+                    headers.pop("Authorization", None)
+                    async with client.stream("GET", url, headers=headers) as unauth_resp:
+                        if unauth_resp.status_code == 404:
+                            raise RepoFetchError(f"Repository '{full_name}' or commit '{commit_sha}' not found on GitHub.")
+                        if unauth_resp.status_code != 200:
+                            raise RepoFetchError(f"GitHub returned HTTP {unauth_resp.status_code} while downloading tarball.")
+                        async for chunk in unauth_resp.aiter_bytes():
+                            buffer.extend(chunk)
+                            if len(buffer) > max_download_bytes:
+                                raise RepoFetchError(
+                                    f"Repository archive exceeded max size limit of {settings.INDEX_MAX_REPO_DOWNLOAD_MB} MB."
+                                )
+                        logger.info(f"Downloaded {len(buffer)} bytes tarball for {full_name}@{commit_sha}. Processing in-memory...")
+                        return process_tar_archive(bytes(buffer))
+
                 if response.status_code == 404:
                     raise RepoFetchError(f"Repository '{full_name}' or commit '{commit_sha}' not found on GitHub.")
                 if response.status_code != 200:
@@ -274,20 +303,35 @@ async def fetch_repository_files(
 async def resolve_branch_head_sha(
     full_name: str,
     branch: str,
-    encrypted_token: str,
+    encrypted_token: str | None = None,
 ) -> str:
     """Fetch the latest commit SHA for a branch from GitHub API."""
-    token = decrypt_token(encrypted_token)
+    token: str | None = None
+    if encrypted_token:
+        try:
+            token = decrypt_token(encrypted_token)
+        except Exception:
+            token = None
+
     url = f"https://api.github.com/repos/{full_name}/commits/{branch}"
     headers = {
-        "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "repo-cartographer",
     }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             resp = await client.get(url, headers=headers)
+            if resp.status_code == 401 and "Authorization" in headers:
+                logger.warning(
+                    f"GitHub returned 401 resolving branch '{branch}' for {full_name} with token. "
+                    "Retrying unauthenticated for public repository..."
+                )
+                headers.pop("Authorization", None)
+                resp = await client.get(url, headers=headers)
+
             if resp.status_code == 404:
                 raise RepoFetchError(f"Branch '{branch}' or repository '{full_name}' not found on GitHub.")
             if resp.status_code != 200:
