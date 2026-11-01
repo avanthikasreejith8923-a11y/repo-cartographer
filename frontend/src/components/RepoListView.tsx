@@ -34,12 +34,12 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
     fetchRepos(true);
   }, []);
 
+  const hasActiveSync = repos.some(
+    (r) => r.status === "pending" || r.status === "syncing"
+  );
+
   // Poll while any repo is pending or syncing
   useEffect(() => {
-    const hasActiveSync = repos.some(
-      (r) => r.status === "pending" || r.status === "syncing"
-    );
-
     let interval: any = null;
     if (hasActiveSync) {
       interval = setInterval(() => {
@@ -50,14 +50,15 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [repos]);
+  }, [hasActiveSync]);
 
   const handleResync = async (e: React.MouseEvent, repoId: string) => {
     e.stopPropagation();
+    if (resyncingId) return;
     setResyncingId(repoId);
     try {
       const res = await fetch(`/repos/${repoId}/sync`, { method: "POST" });
-      if (res.ok) {
+      if (res.ok || res.status === 409) {
         // Immediate status update locally
         setRepos((prev) =>
           prev.map((r) => (r.id === repoId ? { ...r, status: "pending", sync_error: null } : r))
@@ -98,10 +99,17 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
 
         <button
           onClick={() => setIsModalOpen(true)}
+          disabled={hasActiveSync}
           className="btn btn-primary"
-          style={{ padding: "0.6rem 1.25rem", fontSize: "0.88rem" }}
+          style={{
+            padding: "0.6rem 1.25rem",
+            fontSize: "0.88rem",
+            opacity: hasActiveSync ? 0.6 : 1,
+            cursor: hasActiveSync ? "not-allowed" : "pointer",
+          }}
+          title={hasActiveSync ? "Sync in progress. Please wait until sync finishes to import." : undefined}
         >
-          + Import Repository
+          {hasActiveSync ? "Sync in progress..." : "+ Import Repository"}
         </button>
       </div>
 
@@ -163,10 +171,11 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
           </div>
           <button
             onClick={() => setIsModalOpen(true)}
+            disabled={hasActiveSync}
             className="btn btn-primary"
-            style={{ marginTop: "0.5rem" }}
+            style={{ marginTop: "0.5rem", opacity: hasActiveSync ? 0.6 : 1 }}
           >
-            Import your first repository
+            {hasActiveSync ? "Sync in progress..." : "Import your first repository"}
           </button>
         </div>
       ) : (
@@ -205,13 +214,21 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
                         className={`badge badge-${
                           repo.index_status === "ready"
                             ? "success"
+                            : (repo.chunk_count && repo.chunk_count > 0 && repo.index_status === "failed")
+                            ? "warning"
                             : repo.index_status === "failed"
                             ? "danger"
                             : "warning"
                         }`}
                         style={{ fontSize: "0.72rem", flexShrink: 0 }}
                       >
-                        {repo.index_status === "ready" ? "Indexed" : repo.index_status === "indexing" ? "Indexing..." : "Index Failed"}
+                        {repo.index_status === "ready"
+                          ? "Indexed"
+                          : (repo.chunk_count && repo.chunk_count > 0 && repo.index_status === "failed")
+                          ? "Partial Index"
+                          : repo.index_status === "indexing"
+                          ? "Indexing..."
+                          : "Index Failed"}
                       </span>
                     )}
                     <span
@@ -248,6 +265,11 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
                 >
                   {repo.description || "No description provided."}
                 </p>
+                {repo.status === "failed" && repo.sync_error && (
+                  <p style={{ color: "var(--danger)", fontSize: "0.8rem", marginTop: "0.4rem", lineHeight: 1.3 }}>
+                    ⚠️ {repo.sync_error}
+                  </p>
+                )}
               </div>
 
               <div>
@@ -278,12 +300,16 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
                   <div style={{ display: "flex", gap: "0.5rem" }}>
                     <button
                       onClick={(e) => handleResync(e, repo.id)}
-                      disabled={repo.status === "syncing" || resyncingId === repo.id}
+                      disabled={repo.status === "syncing" || repo.status === "pending" || resyncingId !== null}
                       className="btn btn-outline"
                       style={{ padding: "0.3rem 0.65rem", fontSize: "0.75rem" }}
                       title="Trigger Re-sync"
                     >
-                      {repo.status === "syncing" ? "Syncing..." : "Re-sync"}
+                      {repo.status === "syncing" || repo.status === "pending"
+                        ? "Syncing..."
+                        : resyncingId === repo.id
+                        ? "Starting..."
+                        : "Re-sync"}
                     </button>
                     <button
                       onClick={(e) => handleDelete(e, repo)}
@@ -306,6 +332,7 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
         onImportSuccess={() => fetchRepos(false)}
+        isSyncInProgress={hasActiveSync}
       />
     </div>
   );
