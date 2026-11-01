@@ -5,12 +5,14 @@ interface ImportRepoModalProps {
   isOpen: boolean;
   onClose: () => void;
   onImportSuccess: () => void;
+  isSyncInProgress?: boolean;
 }
 
 export const ImportRepoModal: React.FC<ImportRepoModalProps> = ({
   isOpen,
   onClose,
   onImportSuccess,
+  isSyncInProgress = false,
 }) => {
   const [repos, setRepos] = useState<AvailableRepo[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -44,6 +46,7 @@ export const ImportRepoModal: React.FC<ImportRepoModalProps> = ({
   if (!isOpen) return null;
 
   const handleImport = async (repo: AvailableRepo) => {
+    if (importingRepo || isSyncInProgress) return;
     setImportingRepo(repo.full_name);
     setError(null);
     try {
@@ -215,7 +218,7 @@ export const ImportRepoModal: React.FC<ImportRepoModalProps> = ({
                   ) : (
                     <button
                       onClick={() => handleImport(repo)}
-                      disabled={importingRepo === repo.full_name}
+                      disabled={importingRepo !== null || isSyncInProgress}
                       className="btn btn-primary"
                       style={{ padding: "0.45rem 1rem", fontSize: "0.82rem" }}
                     >
