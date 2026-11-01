@@ -11,32 +11,48 @@ export const DashboardView: React.FC = () => {
   const [selectedRepo, setSelectedRepo] = useState<Repository | null>(null);
 
   useEffect(() => {
+    let timer: any = null;
+    let isCancelled = false;
+
     const fetchHealth = async () => {
       try {
         const res = await fetch("/health");
-        if (res.ok) {
+        if (res.ok && !isCancelled) {
           const data: HealthStatus = await res.json();
           setHealth(data);
         }
       } catch (err) {
         console.error("Health fetch error:", err);
       } finally {
-        setHealthLoading(false);
+        if (!isCancelled) setHealthLoading(false);
       }
     };
+
     fetchHealth();
+    timer = setInterval(fetchHealth, 5000);
+
+    return () => {
+      isCancelled = true;
+      if (timer) clearInterval(timer);
+    };
   }, []);
 
+  const [resyncingRepoId, setResyncingRepoId] = useState<string | null>(null);
+
   const handleResyncRepo = async (repoId: string) => {
+    if (resyncingRepoId === repoId) return;
+    setResyncingRepoId(repoId);
     try {
       const res = await fetch(`/repos/${repoId}/sync`, { method: "POST" });
-      if (res.ok) {
+      if (res.ok || res.status === 409) {
         if (selectedRepo && selectedRepo.id === repoId) {
           setSelectedRepo({ ...selectedRepo, status: "pending", sync_error: null });
         }
       }
     } catch (err) {
       console.error("Failed to trigger re-sync:", err);
+    } finally {
+      setResyncingRepoId(null);
     }
   };
 
@@ -48,6 +64,43 @@ export const DashboardView: React.FC = () => {
 
   return (
     <div style={{ maxWidth: "1180px", margin: "2rem auto", padding: "0 1.5rem", width: "100%", display: "flex", flexDirection: "column", gap: "2rem" }}>
+      {/* Background Worker Warning Banner */}
+      {health && health.worker === "not running" && (
+        <div
+          id="worker-down-banner"
+          className="glass-card"
+          style={{
+            padding: "1rem 1.5rem",
+            background: "rgba(239, 68, 68, 0.12)",
+            border: "1px solid var(--danger)",
+            borderRadius: "var(--radius-md)",
+            color: "var(--danger)",
+            fontSize: "0.92rem",
+            fontWeight: 600,
+            display: "flex",
+            alignItems: "center",
+            gap: "0.75rem",
+          }}
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{ flexShrink: 0 }}
+          >
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          <span>Background worker is not running. Imports, sync, and indexing will not start. Run scripts\dev-worker.ps1</span>
+        </div>
+      )}
+
       {/* Top Banner / Welcome */}
       <div
         className="glass-card"
@@ -171,6 +224,12 @@ export const DashboardView: React.FC = () => {
                     <span style={{ color: "var(--text-muted)" }}>Redis / ARQ Worker Queue</span>
                     <span style={{ color: health?.redis === "connected" ? "var(--success)" : "var(--danger)" }}>
                       {health?.redis === "connected" ? "Connected" : "Disconnected"}
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ color: "var(--text-muted)" }}>ARQ Worker Process</span>
+                    <span style={{ color: health?.worker === "alive" ? "var(--success)" : "var(--danger)" }}>
+                      {health?.worker === "alive" ? "Alive" : "Not Running"}
                     </span>
                   </div>
                 </div>
