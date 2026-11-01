@@ -32,6 +32,22 @@ class IndexingError(Exception):
     """Exception raised when repository indexing fails."""
 
 
+def _file_priority(path: str) -> int:
+    """Sort source files first (0), docs second (1), other configs/data last (2)."""
+    p_lower = path.lower()
+    source_exts = (
+        ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java",
+        ".cpp", ".c", ".h", ".hpp", ".cs", ".rb", ".php", ".swift",
+        ".kt", ".scala", ".m", ".sh", ".bash", ".zsh", ".sql", ".html", ".css",
+    )
+    if any(p_lower.endswith(ext) for ext in source_exts):
+        return 0
+    doc_exts = (".md", ".markdown", ".rst", ".txt", ".adoc")
+    if any(p_lower.endswith(ext) for ext in doc_exts) or "readme" in p_lower:
+        return 1
+    return 2
+
+
 def _to_float_list(val: Any) -> list[float]:
     """Ensure embedding value is a list of floats (handling string representation from pgvector)."""
     if val is None:
@@ -129,7 +145,8 @@ async def execute_repo_indexing(
     # 1. Fetch Repository and User
     repo = await db.get(Repository, repo_id)
     if not repo:
-        raise IndexingError(f"Repository {repo_id} not found.")
+        logger.info(f"Repository {repo_id} no longer exists in database; skipping indexing job.")
+        return None  # type: ignore[return-value]
 
     user = await db.get(User, repo.user_id)
     if not user:
@@ -139,6 +156,18 @@ async def execute_repo_indexing(
     job: IndexJob | None = None
     if job_id:
         job = await db.get(IndexJob, job_id)
+
+    if not job:
+        active_job_stmt = (
+            select(IndexJob)
+            .where(
+                IndexJob.repo_id == repo.id,
+                IndexJob.status.in_(["pending", "running"]),
+            )
+            .order_by(IndexJob.created_at.desc())
+        )
+        active_job_res = await db.execute(active_job_stmt)
+        job = active_job_res.scalars().first()
 
     if not job:
         job = IndexJob(
@@ -155,12 +184,15 @@ async def execute_repo_indexing(
     provider = embedding_provider or get_embedding_provider()
 
     try:
-        # Mark running
+        # Mark running and update repo status in same transaction
         job.status = "running"
         job.stage = "fetching"
         job.progress = 10
         repo.index_status = "indexing"
         await db.commit()
+        if hasattr(db, "refresh"):
+            await db.refresh(repo)
+            await db.refresh(job)
 
         # Check demo or mock mode
         is_demo_or_mock = settings.DEMO_MODE or not user.encrypted_access_token
@@ -170,6 +202,7 @@ async def execute_repo_indexing(
             else:
                 try:
                     from app.core.security import decrypt_token
+
                     raw_token = decrypt_token(user.encrypted_access_token)
                     if raw_token.startswith("ghp_demo"):
                         is_demo_or_mock = True
@@ -179,13 +212,16 @@ async def execute_repo_indexing(
         # Target commit SHA
         target_commit_sha = repo.default_branch or "main"
         if not is_demo_or_mock:
-            resolved_sha = await resolve_branch_head_sha(
-                full_name=repo.full_name,
-                branch=target_commit_sha,
-                encrypted_token=user.encrypted_access_token,
-            )
-            if resolved_sha:
-                target_commit_sha = resolved_sha
+            try:
+                resolved_sha = await resolve_branch_head_sha(
+                    full_name=repo.full_name,
+                    branch=target_commit_sha,
+                    encrypted_token=user.encrypted_access_token,
+                )
+                if resolved_sha:
+                    target_commit_sha = resolved_sha
+            except Exception as e:
+                logger.warning(f"Could not resolve branch head sha ({e}), using '{target_commit_sha}'")
 
         # Stage 1: Fetching
         fetched_files: list[FetchedFile] = []
@@ -193,11 +229,33 @@ async def execute_repo_indexing(
             fetched_files = _get_sample_repo_files()
             logger.info(f"Using sample files for repo {repo.full_name} in demo/mock mode.")
         else:
-            fetched_files = await fetch_repository_files(
-                full_name=repo.full_name,
-                commit_sha=target_commit_sha,
-                encrypted_token=user.encrypted_access_token,
-            )
+            try:
+                fetched_files = await fetch_repository_files(
+                    full_name=repo.full_name,
+                    commit_sha=target_commit_sha,
+                    encrypted_token=user.encrypted_access_token,
+                )
+            except Exception as exc:
+                # If GitHub rate limit was hit but repo is already indexed in DB, reuse existing files
+                existing_files_stmt = select(RepoFile).where(RepoFile.repo_id == repo.id)
+                existing_files_res = await db.execute(existing_files_stmt)
+                existing_list = list(existing_files_res.scalars().all())
+                if existing_list:
+                    logger.warning(
+                        f"GitHub fetch failed ({exc}); reusing {len(existing_list)} existing indexed files from DB."
+                    )
+                    fetched_files = [
+                        FetchedFile(
+                            path=rf.path,
+                            content="",
+                            language=rf.language,
+                            size_bytes=rf.size_bytes or 0,
+                            content_hash=rf.content_hash,
+                        )
+                        for rf in existing_list
+                    ]
+                else:
+                    raise
 
         # Stage 2: Filtering
         job.stage = "filtering"
@@ -230,11 +288,12 @@ async def execute_repo_indexing(
             else:
                 unchanged_paths.add(path)
 
-        # Chunk modified and new files with INDEX_MAX_CHUNKS cap
-        paths_to_chunk = sorted(new_paths | modified_paths)
+        # Priority sorting: source files first, docs second, other configs/data last
+        paths_to_chunk = sorted(new_paths | modified_paths, key=lambda p: (_file_priority(p), p))
         new_chunks_by_path: dict[str, list[Any]] = {}
         total_chunks_collected = 0
         truncated = False
+        seen_content_hashes: set[str] = set()
 
         for path in paths_to_chunk:
             if total_chunks_collected >= settings.INDEX_MAX_CHUNKS:
@@ -243,59 +302,22 @@ async def execute_repo_indexing(
             f_item = fetched_by_path[path]
             chunks = chunk_file(f_item.path, f_item.content, f_item.language)
             remaining_capacity = settings.INDEX_MAX_CHUNKS - total_chunks_collected
-            if len(chunks) > remaining_capacity:
-                chunks = chunks[:remaining_capacity]
-                truncated = True
-            new_chunks_by_path[path] = chunks
-            total_chunks_collected += len(chunks)
 
-        # Stage 4: Embedding
-        job.stage = "embedding"
-        job.progress = 60
-        await db.commit()
-
-        # Flatten chunks to embed
-        all_new_chunks: list[tuple[str, Any]] = []
-        for path, chunks in new_chunks_by_path.items():
+            # Skip duplicate chunk contents
+            deduped_chunks = []
             for c in chunks:
-                all_new_chunks.append((path, c))
+                if c.content_hash in seen_content_hashes:
+                    continue
+                seen_content_hashes.add(c.content_hash)
+                deduped_chunks.append(c)
+                if len(deduped_chunks) >= remaining_capacity:
+                    truncated = True
+                    break
 
-        # Check existing embeddings cache by content_hash to avoid re-computing
-        unique_hashes = list({c.content_hash for _, c in all_new_chunks})
-        hash_to_embedding: dict[str, list[float]] = {}
+            new_chunks_by_path[path] = deduped_chunks
+            total_chunks_collected += len(deduped_chunks)
 
-        if unique_hashes:
-            cached_stmt = (
-                select(CodeChunk.content_hash, CodeChunk.embedding)
-                .where(CodeChunk.content_hash.in_(unique_hashes))
-            )
-            cached_res = await db.execute(cached_stmt)
-            for row in cached_res.all():
-                if row[0] not in hash_to_embedding:
-                    hash_to_embedding[row[0]] = _to_float_list(row[1])
-
-        # Embed remaining uncached chunks
-        texts_to_embed: list[str] = []
-        hashes_to_embed: list[str] = []
-        for _, c in all_new_chunks:
-            if c.content_hash not in hash_to_embedding and c.content_hash not in hashes_to_embed:
-                texts_to_embed.append(c.embed_text)
-                hashes_to_embed.append(c.content_hash)
-
-        if texts_to_embed:
-            embeddings_list = await provider.embed_documents(texts_to_embed)
-            for h, emb in zip(hashes_to_embed, embeddings_list, strict=True):
-                hash_to_embedding[h] = emb
-
-        job.progress = 80
-        await db.commit()
-
-        # Stage 5: Saving & Database Updates
-        job.stage = "saving"
-        job.progress = 90
-        await db.commit()
-
-        # 5a. Delete chunks and RepoFiles for deleted paths
+        # Stage 4: Clean up removed paths & prepare files
         if deleted_paths:
             await db.execute(
                 delete(CodeChunk).where(CodeChunk.repo_id == repo.id, CodeChunk.path.in_(deleted_paths))
@@ -304,16 +326,13 @@ async def execute_repo_indexing(
                 delete(RepoFile).where(RepoFile.repo_id == repo.id, RepoFile.path.in_(deleted_paths))
             )
 
-        # 5b. Delete old chunks for modified paths
         if modified_paths:
             await db.execute(
                 delete(CodeChunk).where(CodeChunk.repo_id == repo.id, CodeChunk.path.in_(modified_paths))
             )
 
-        # 5c. Upsert RepoFiles
         now = datetime.now(UTC)
         repo_files_to_save: dict[str, RepoFile] = {}
-
         for path in unchanged_paths:
             repo_files_to_save[path] = existing_files[path]
 
@@ -340,36 +359,177 @@ async def execute_repo_indexing(
 
         await db.flush()
 
-        # 5d. Insert CodeChunks in bounded batches of 100
-        chunks_to_insert: list[CodeChunk] = []
-        for path, chunks in new_chunks_by_path.items():
-            rf = repo_files_to_save[path]
-            for c in chunks:
-                emb = _to_float_list(hash_to_embedding.get(c.content_hash, [0.0] * settings.EMBEDDING_DIM))
-                chunk_record = CodeChunk(
-                    id=uuid.uuid4(),
-                    repo_id=repo.id,
-                    file_id=rf.id,
-                    path=c.path,
-                    chunk_index=c.chunk_index,
-                    start_line=c.start_line,
-                    end_line=c.end_line,
-                    language=c.language,
-                    kind=c.kind,
-                    symbol=c.symbol,
-                    content=c.content,
-                    content_hash=c.content_hash,
-                    embedding=emb,
-                    embedding_model=settings.EMBEDDING_MODEL,
-                )
-                chunks_to_insert.append(chunk_record)
+        # Stage 5: Incremental Embedding & Immediate Saving
+        job.stage = "embedding"
+        job.progress = 50
+        await db.commit()
 
-        if chunks_to_insert:
-            BATCH_SIZE = 100
-            for i in range(0, len(chunks_to_insert), BATCH_SIZE):
-                batch = chunks_to_insert[i : i + BATCH_SIZE]
-                db.add_all(batch)
-                await db.flush()
+        # Query existing chunks for this repo to continue where it stopped
+        existing_repo_chunks_stmt = select(
+            CodeChunk.path, CodeChunk.chunk_index, CodeChunk.content_hash, CodeChunk.embedding
+        ).where(CodeChunk.repo_id == repo.id)
+        existing_repo_chunks_res = await db.execute(existing_repo_chunks_stmt)
+        existing_repo_chunks: dict[tuple[str, int], tuple[str, Any]] = {
+            (row[0], row[1]): (row[2], row[3]) for row in existing_repo_chunks_res.all()
+        }
+
+        # Check existing embeddings cache across database by content_hash
+        all_target_chunks: list[tuple[str, Any]] = []
+        for path, chunks in new_chunks_by_path.items():
+            for c in chunks:
+                all_target_chunks.append((path, c))
+
+        unique_target_hashes = list({c.content_hash for _, c in all_target_chunks})
+        hash_to_embedding: dict[str, list[float]] = {}
+
+        if unique_target_hashes:
+            cached_stmt = select(CodeChunk.content_hash, CodeChunk.embedding).where(
+                CodeChunk.content_hash.in_(unique_target_hashes),
+                CodeChunk.embedding.is_not(None),
+            )
+            cached_res = await db.execute(cached_stmt)
+            for row in cached_res.all():
+                if row[0] not in hash_to_embedding and row[1] is not None:
+                    hash_to_embedding[row[0]] = _to_float_list(row[1])
+
+        # Chunks that truly need Gemini API calls
+        chunks_to_embed: list[tuple[str, Any]] = []
+        for path, c in all_target_chunks:
+            existing = existing_repo_chunks.get((path, c.chunk_index))
+            if existing and existing[0] == c.content_hash and existing[1] is not None:
+                hash_to_embedding[c.content_hash] = _to_float_list(existing[1])
+                continue
+            if c.content_hash not in hash_to_embedding:
+                chunks_to_embed.append((path, c))
+
+        total_chunks_to_index = len(all_target_chunks)
+        total_needing_embed = len(chunks_to_embed)
+        logger.info(
+            f"Codebase indexing for {repo.full_name}: {total_chunks_to_index} target chunks, "
+            f"{total_needing_embed} chunks requiring new Gemini embeddings."
+        )
+
+        # Save any chunks whose embeddings are already cached
+        for path, c in all_target_chunks:
+            if (path, c.chunk_index) not in existing_repo_chunks and c.content_hash in hash_to_embedding:
+                rf = repo_files_to_save[path]
+                emb = hash_to_embedding[c.content_hash]
+                db.add(
+                    CodeChunk(
+                        id=uuid.uuid4(),
+                        repo_id=repo.id,
+                        file_id=rf.id,
+                        path=c.path,
+                        chunk_index=c.chunk_index,
+                        start_line=c.start_line,
+                        end_line=c.end_line,
+                        language=c.language,
+                        kind=c.kind,
+                        symbol=c.symbol,
+                        content=c.content,
+                        content_hash=c.content_hash,
+                        embedding=emb,
+                        embedding_model=settings.EMBEDDING_MODEL,
+                    )
+                )
+        await db.commit()
+
+        # Batch chunks to embed
+        batches: list[list[tuple[str, Any]]] = []
+        current_b: list[tuple[str, Any]] = []
+        current_chars = 0
+
+        for item in chunks_to_embed:
+            c_len = len(item[1].embed_text)
+            if current_b and (
+                len(current_b) >= settings.EMBED_BATCH_SIZE
+                or current_chars + c_len > settings.EMBED_MAX_CHARS_PER_REQUEST
+            ):
+                batches.append(current_b)
+                current_b = [item]
+                current_chars = c_len
+            else:
+                current_b.append(item)
+                current_chars += c_len
+        if current_b:
+            batches.append(current_b)
+
+        embedded_count = 0
+        from app.services.gemini_retry import GeminiRateLimitBudgetExceeded
+
+        try:
+            for b in batches:
+                batch_texts = [c.embed_text for _, c in b]
+                batch_embeddings = await provider.embed_documents(batch_texts)
+                for (_, c), emb in zip(b, batch_embeddings, strict=True):
+                    hash_to_embedding[c.content_hash] = emb
+
+                # Save each batch to database immediately
+                for path, c in b:
+                    rf = repo_files_to_save[path]
+                    emb = hash_to_embedding[c.content_hash]
+                    db.add(
+                        CodeChunk(
+                            id=uuid.uuid4(),
+                            repo_id=repo.id,
+                            file_id=rf.id,
+                            path=c.path,
+                            chunk_index=c.chunk_index,
+                            start_line=c.start_line,
+                            end_line=c.end_line,
+                            language=c.language,
+                            kind=c.kind,
+                            symbol=c.symbol,
+                            content=c.content,
+                            content_hash=c.content_hash,
+                            embedding=emb,
+                            embedding_model=settings.EMBEDDING_MODEL,
+                        )
+                    )
+
+                embedded_count += len(b)
+                if total_needing_embed > 0:
+                    job.progress = 50 + int(40 * (embedded_count / total_needing_embed))
+                await db.commit()
+                logger.info(
+                    f"Saved batch ({embedded_count}/{total_needing_embed} embedded) for {repo.full_name} ({job.progress}%)"
+                )
+
+        except GeminiRateLimitBudgetExceeded as rle:
+            total_saved_res = await db.execute(
+                select(func.count(CodeChunk.id)).where(CodeChunk.repo_id == repo.id)
+            )
+            saved_chunks = total_saved_res.scalar() or 0
+            now = datetime.now(UTC)
+
+            job.status = "failed"
+            job.stage = "failed"
+            job.finished_at = now
+            if saved_chunks > 0:
+                repo.index_status = "ready"
+                repo.indexed_at = now
+                repo.chunk_count = saved_chunks
+                repo.indexed_commit_sha = target_commit_sha
+                job.error = (
+                    f"Gemini rate limit reached. {saved_chunks} of {total_chunks_to_index} chunks were saved. "
+                    "Click Index again to continue."
+                )
+                job.stats = {
+                    "partial": True,
+                    "saved_chunks": saved_chunks,
+                    "total_chunks": total_chunks_to_index,
+                }
+            else:
+                repo.index_status = "failed"
+                job.error = "Gemini rate limit reached. 0 chunks were saved. Click Index again to retry."
+                job.stats = {"partial": False, "saved_chunks": 0, "total_chunks": total_chunks_to_index}
+
+            await db.commit()
+            if hasattr(db, "refresh"):
+                await db.refresh(repo)
+                await db.refresh(job)
+            logger.warning(f"Indexing interrupted by rate limit for {repo.full_name}: {job.error} ({rle})")
+            return job
 
         # Total chunk count
         total_chunks_res = await db.execute(
@@ -377,7 +537,13 @@ async def execute_repo_indexing(
         )
         total_chunks = total_chunks_res.scalar() or 0
 
-        # Complete Repository & Job
+        if total_chunks == 0:
+            raise IndexingError(
+                f"Repository indexing produced 0 code chunks for {repo.full_name}. "
+                "Ensure repository contains supported, non-empty source files."
+            )
+
+        # Complete Repository & Job in the SAME transaction
         repo.index_status = "ready"
         repo.indexed_commit_sha = target_commit_sha
         repo.indexed_at = now
@@ -387,6 +553,7 @@ async def execute_repo_indexing(
         job.stage = "completed"
         job.progress = 100
         job.finished_at = now
+        job.error = None
         job.stats = {
             "total_files": total_files,
             "new_files": len(new_paths),
@@ -394,28 +561,63 @@ async def execute_repo_indexing(
             "unchanged_files": len(unchanged_paths),
             "deleted_files": len(deleted_paths),
             "total_chunks": total_chunks,
-            "new_chunks": len(chunks_to_insert),
+            "new_chunks": embedded_count,
             "truncated": truncated,
+            "partial": False,
         }
 
         await db.commit()
+        if hasattr(db, "refresh"):
+            await db.refresh(repo)
+            await db.refresh(job)
+
         logger.info(
             f"Successfully indexed repo {repo.full_name}: {total_files} files, {total_chunks} total chunks."
         )
         return job
 
     except Exception as exc:
+        repo_id_val = repo.id if repo else repo_id
+        job_id_val = job.id if job else job_id
         await db.rollback()
         error_msg = str(exc)[:500]
         logger.error(f"Failed to index repo {repo_id}: {error_msg}")
 
-        job.status = "failed"
-        job.stage = "failed"
-        job.error = error_msg
-        job.finished_at = datetime.now(UTC)
-        repo.index_status = "failed"
+        # Reload fresh instances cleanly
+        repo = await db.get(Repository, repo_id_val)
+        job = await db.get(IndexJob, job_id_val) if job_id_val else None
 
-        db.add(job)
-        db.add(repo)
+        # Check if partial chunks exist
+        total_saved_res = await db.execute(
+            select(func.count(CodeChunk.id)).where(CodeChunk.repo_id == repo_id_val)
+        )
+        saved_chunks = total_saved_res.scalar() or 0
+        now = datetime.now(UTC)
+
+        if job:
+            job.status = "failed"
+            job.stage = "failed"
+            job.error = error_msg
+            job.finished_at = now
+            if saved_chunks > 0:
+                job.stats = {"partial": True, "saved_chunks": saved_chunks}
+            else:
+                job.stats = {"partial": False, "saved_chunks": 0}
+            db.add(job)
+
+        if repo:
+            if saved_chunks > 0:
+                repo.index_status = "ready"
+                repo.chunk_count = saved_chunks
+                repo.indexed_at = now
+            else:
+                repo.index_status = "failed"
+            db.add(repo)
+
         await db.commit()
+        if hasattr(db, "refresh"):
+            if repo:
+                await db.refresh(repo)
+            if job:
+                await db.refresh(job)
         return job
