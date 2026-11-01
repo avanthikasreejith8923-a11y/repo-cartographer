@@ -259,7 +259,7 @@ class DocResponse(BaseModel):
     doc_type: str
     status: str
     content_markdown: str | None = None
-    citations: list[dict[str, Any]] | list[Any] = []
+    citations: list[dict[str, Any]] | list[Any] = Field(default_factory=list)
     error: str | None = None
     model: str | None = None
     indexed_commit_sha: str | None = None
@@ -267,5 +267,11 @@ class DocResponse(BaseModel):
     generated_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+    @field_validator("citations", mode="before")
+    @classmethod
+    def ensure_citations_list(cls, v: Any) -> list:
+        return v if v is not None else []
+
 
 
