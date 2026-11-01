@@ -147,3 +147,27 @@ def test_content_hash_and_embed_text():
     embed_without_sym = build_embed_text("path/test.py", None, content)
     assert "File: path/test.py" in embed_without_sym
     assert "Symbol:" not in embed_without_sym
+
+
+def test_oversized_chunk_splitting_across_file_types():
+    from app.services.chunker import MAX_CHUNK_CHARS
+
+    # 1. Plain text with a massive single line (> 2 * MAX_CHUNK_CHARS)
+    massive_line = "A" * (MAX_CHUNK_CHARS * 2 + 500)
+    chunks_txt = chunk_file("data.txt", massive_line, "plaintext")
+    assert len(chunks_txt) >= 3
+    for c in chunks_txt:
+        assert len(c.content) <= MAX_CHUNK_CHARS
+
+    # 2. Markdown with huge text under a single header
+    huge_md = "# Title\n" + ("B" * (MAX_CHUNK_CHARS + 200)) + "\n## Next\nNormal"
+    chunks_md = chunk_file("doc.md", huge_md, "markdown")
+    for c in chunks_md:
+        assert len(c.content) <= MAX_CHUNK_CHARS
+
+    # 3. Python code with a huge function
+    huge_func = "def huge():\n" + ("    x = 1\n" * 400)
+    chunks_py = chunk_file("huge.py", huge_func, "python")
+    for c in chunks_py:
+        assert len(c.content) <= MAX_CHUNK_CHARS
+

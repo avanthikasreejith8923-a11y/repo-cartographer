@@ -83,9 +83,14 @@ def chunk_file(path: str, content: str, language: str) -> list[CodeChunkItem]:
     if not chunks:
         chunks = _chunk_sliding_window(path, lines, language)
 
+    # Ensure no chunk can exceed MAX_CHUNK_CHARS regardless of file type
+    bounded_chunks: list[CodeChunkItem] = []
+    for c in chunks:
+        bounded_chunks.extend(_split_oversized_chunk(c, MAX_CHUNK_CHARS))
+
     # Re-index chunks to ensure strict sequential 0..N-1 indexing
     reindexed: list[CodeChunkItem] = []
-    for idx, c in enumerate(chunks):
+    for idx, c in enumerate(bounded_chunks):
         reindexed.append(
             CodeChunkItem(
                 path=c.path,
@@ -101,6 +106,113 @@ def chunk_file(path: str, content: str, language: str) -> list[CodeChunkItem]:
             )
         )
     return reindexed
+
+
+def _split_oversized_chunk(chunk: CodeChunkItem, max_chars: int = MAX_CHUNK_CHARS) -> list[CodeChunkItem]:
+    """Ensure a chunk does not exceed max_chars. If it does, split it into smaller chunks."""
+    if len(chunk.content) <= max_chars:
+        return [chunk]
+
+    sub_chunks: list[CodeChunkItem] = []
+    chunk_lines = chunk.content.splitlines(keepends=True)
+    current_lines: list[str] = []
+    current_len = 0
+    sub_start_line = chunk.start_line
+
+    for line in chunk_lines:
+        line_len = len(line)
+        if line_len > max_chars:
+            if current_lines:
+                text = "".join(current_lines).strip()
+                if text:
+                    sub_end_line = sub_start_line + max(0, len(current_lines) - 1)
+                    h = compute_content_hash(text)
+                    sub_chunks.append(
+                        CodeChunkItem(
+                            path=chunk.path,
+                            chunk_index=len(sub_chunks),
+                            start_line=sub_start_line,
+                            end_line=sub_end_line,
+                            language=chunk.language,
+                            kind=chunk.kind,
+                            symbol=chunk.symbol,
+                            content=text,
+                            content_hash=h,
+                            embed_text=build_embed_text(chunk.path, chunk.symbol, text),
+                        )
+                    )
+                    sub_start_line = sub_end_line + 1
+                current_lines = []
+                current_len = 0
+
+            for i in range(0, len(line), max_chars):
+                slice_text = line[i : i + max_chars].strip()
+                if slice_text:
+                    h = compute_content_hash(slice_text)
+                    sub_chunks.append(
+                        CodeChunkItem(
+                            path=chunk.path,
+                            chunk_index=len(sub_chunks),
+                            start_line=sub_start_line,
+                            end_line=sub_start_line,
+                            language=chunk.language,
+                            kind=chunk.kind,
+                            symbol=chunk.symbol,
+                            content=slice_text,
+                            content_hash=h,
+                            embed_text=build_embed_text(chunk.path, chunk.symbol, slice_text),
+                        )
+                    )
+            sub_start_line += 1
+            continue
+
+        if current_len + line_len > max_chars and current_lines:
+            text = "".join(current_lines).strip()
+            if text:
+                sub_end_line = sub_start_line + max(0, len(current_lines) - 1)
+                h = compute_content_hash(text)
+                sub_chunks.append(
+                    CodeChunkItem(
+                        path=chunk.path,
+                        chunk_index=len(sub_chunks),
+                        start_line=sub_start_line,
+                        end_line=sub_end_line,
+                        language=chunk.language,
+                        kind=chunk.kind,
+                        symbol=chunk.symbol,
+                        content=text,
+                        content_hash=h,
+                        embed_text=build_embed_text(chunk.path, chunk.symbol, text),
+                    )
+                )
+                sub_start_line = sub_end_line + 1
+            current_lines = [line]
+            current_len = line_len
+        else:
+            current_lines.append(line)
+            current_len += line_len
+
+    if current_lines:
+        text = "".join(current_lines).strip()
+        if text:
+            sub_end_line = chunk.end_line
+            h = compute_content_hash(text)
+            sub_chunks.append(
+                CodeChunkItem(
+                    path=chunk.path,
+                    chunk_index=len(sub_chunks),
+                    start_line=sub_start_line,
+                    end_line=sub_end_line,
+                    language=chunk.language,
+                    kind=chunk.kind,
+                    symbol=chunk.symbol,
+                    content=text,
+                    content_hash=h,
+                    embed_text=build_embed_text(chunk.path, chunk.symbol, text),
+                )
+            )
+
+    return sub_chunks
 
 
 def _chunk_python(path: str, content: str, lines: list[str]) -> list[CodeChunkItem]:
