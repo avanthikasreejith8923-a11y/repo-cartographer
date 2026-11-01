@@ -1,5 +1,6 @@
 """Repository synchronization pipeline handling background ingestion and stage progress."""
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -62,8 +63,43 @@ async def sync_commits_stage(
         max_items=settings.SYNC_MAX_COMMITS,
     )
 
+    # Query existing commits for this repo to reuse already fetched stats
+    existing_stmt = select(
+        Commit.sha, Commit.additions, Commit.deletions, Commit.files_changed
+    ).where(Commit.repo_id == repo.id)
+    existing_res = await db.execute(existing_stmt)
+    existing_commits = {
+        row[0]: (row[1], row[2], row[3]) for row in existing_res.all()
+    }
+
+    # Only fetch stats for commits that do not already have stats in the DB
+    needed_shas = [
+        c["sha"]
+        for idx, c in enumerate(raw_commits[: settings.SYNC_STATS_COMMITS_LIMIT])
+        if c["sha"] not in existing_commits or existing_commits[c["sha"]][0] is None
+    ]
+
+    fetched_stats: dict[str, dict[str, Any]] = {}
+    if needed_shas:
+        semaphore = asyncio.Semaphore(10)
+
+        async def _fetch_stats(sha_str: str) -> None:
+            async with semaphore:
+                try:
+                    det = await client.get_commit(owner=owner, repo=repo_name, sha=sha_str)
+                    stats = det.get("stats", {})
+                    fetched_stats[sha_str] = {
+                        "additions": stats.get("additions"),
+                        "deletions": stats.get("deletions"),
+                        "files_changed": len(det.get("files", [])) or stats.get("total"),
+                    }
+                except Exception as e:
+                    logger.debug(f"Could not fetch stats for commit {sha_str[:7]}: {e}")
+
+        await asyncio.gather(*[_fetch_stats(s) for s in needed_shas])
+
     upserted_count = 0
-    for idx, c in enumerate(raw_commits):
+    for c in raw_commits:
         sha = c["sha"]
         commit_meta = c.get("commit", {})
         author_meta = c.get("author") or {}
@@ -77,16 +113,12 @@ async def sync_commits_stage(
         deletions: int | None = None
         files_changed: int | None = None
 
-        # Fetch per-item stats only for the most recent N commits to protect rate limits
-        if idx < settings.SYNC_STATS_COMMITS_LIMIT:
-            try:
-                detail = await client.get_commit(owner=owner, repo=repo_name, sha=sha)
-                stats = detail.get("stats", {})
-                additions = stats.get("additions")
-                deletions = stats.get("deletions")
-                files_changed = len(detail.get("files", [])) or stats.get("total")
-            except Exception as e:
-                logger.debug(f"Could not fetch stats for commit {sha[:7]}: {e}")
+        if sha in fetched_stats:
+            additions = fetched_stats[sha]["additions"]
+            deletions = fetched_stats[sha]["deletions"]
+            files_changed = fetched_stats[sha]["files_changed"]
+        elif sha in existing_commits and existing_commits[sha][0] is not None:
+            additions, deletions, files_changed = existing_commits[sha]
 
         insert_stmt = insert(Commit).values(
             repo_id=repo.id,
@@ -134,8 +166,41 @@ async def sync_pull_requests_stage(
         max_items=settings.SYNC_MAX_PRS,
     )
 
+    # Query existing PRs for this repo to reuse already fetched stats
+    existing_stmt = select(
+        PullRequest.number, PullRequest.additions, PullRequest.deletions, PullRequest.changed_files
+    ).where(PullRequest.repo_id == repo.id)
+    existing_res = await db.execute(existing_stmt)
+    existing_prs = {
+        row[0]: (row[1], row[2], row[3]) for row in existing_res.all()
+    }
+
+    needed_pr_numbers = [
+        pr["number"]
+        for idx, pr in enumerate(raw_prs[: settings.SYNC_STATS_PRS_LIMIT])
+        if pr["number"] not in existing_prs or existing_prs[pr["number"]][0] is None
+    ]
+
+    fetched_pr_stats: dict[int, dict[str, Any]] = {}
+    if needed_pr_numbers:
+        semaphore = asyncio.Semaphore(10)
+
+        async def _fetch_pr_detail(num: int) -> None:
+            async with semaphore:
+                try:
+                    det = await client.get_pull_request(owner=owner, repo=repo_name, number=num)
+                    fetched_pr_stats[num] = {
+                        "additions": det.get("additions"),
+                        "deletions": det.get("deletions"),
+                        "changed_files": det.get("changed_files"),
+                    }
+                except Exception as e:
+                    logger.debug(f"Could not fetch stats for PR #{num}: {e}")
+
+        await asyncio.gather(*[_fetch_pr_detail(n) for n in needed_pr_numbers])
+
     upserted_count = 0
-    for idx, pr in enumerate(raw_prs):
+    for pr in raw_prs:
         number = pr["number"]
         author_meta = pr.get("user") or {}
         created_at = parse_github_datetime(pr.get("created_at"))
@@ -146,15 +211,12 @@ async def sync_pull_requests_stage(
         deletions: int | None = None
         changed_files: int | None = None
 
-        # Fetch per-item stats only for the most recent N PRs to protect rate limits
-        if idx < settings.SYNC_STATS_PRS_LIMIT:
-            try:
-                detail = await client.get_pull_request(owner=owner, repo=repo_name, number=number)
-                additions = detail.get("additions")
-                deletions = detail.get("deletions")
-                changed_files = detail.get("changed_files")
-            except Exception as e:
-                logger.debug(f"Could not fetch stats for PR #{number}: {e}")
+        if number in fetched_pr_stats:
+            additions = fetched_pr_stats[number]["additions"]
+            deletions = fetched_pr_stats[number]["deletions"]
+            changed_files = fetched_pr_stats[number]["changed_files"]
+        elif number in existing_prs and existing_prs[number][0] is not None:
+            additions, deletions, changed_files = existing_prs[number]
 
         insert_stmt = insert(PullRequest).values(
             repo_id=repo.id,
@@ -276,7 +338,7 @@ async def execute_repo_sync(repo_id: str | uuid.UUID, db: AsyncSession) -> None:
     result = await db.execute(stmt)
     repo = result.scalar_one_or_none()
     if not repo:
-        logger.error(f"Sync failed: Repository {repo_id} not found in database.")
+        logger.info(f"Repository {repo_id} no longer exists in database; skipping sync job.")
         return
 
     user_stmt = select(User).where(User.id == repo.user_id)
@@ -371,7 +433,7 @@ async def execute_repo_sync(repo_id: str | uuid.UUID, db: AsyncSession) -> None:
             err_msg = f"{exc}: {exc.response_body}"
         logger.exception(f"Sync error on repo {repo.full_name}: {err_msg}")
 
-        repo.status = "failed"
+        repo.status = "ready" if repo.last_synced_at else "failed"
         repo.sync_error = err_msg
 
         sync_job.status = "failed"
