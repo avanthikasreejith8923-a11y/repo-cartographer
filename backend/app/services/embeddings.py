@@ -16,6 +16,11 @@ import httpx
 
 from app.core.config import settings
 from app.core.logging import logger
+from app.services.gemini_retry import (
+    GeminiRateLimitBudgetExceeded,
+    embedding_pacer,
+    extract_retry_delay,
+)
 
 
 def normalize_l2(vector: Sequence[float]) -> list[float]:
@@ -91,9 +96,9 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
     async def _post_batch(
         self,
         requests_payload: list[dict],
-        max_retries: int = 3,
+        max_retries: int = 10,
     ) -> list[list[float]]:
-        """Send a batchEmbedContents request with exponential backoff on 429/5xx."""
+        """Send a batchEmbedContents request with retry delay extraction and pacing."""
         url = f"https://generativelanguage.googleapis.com/v1beta/{self.model}:batchEmbedContents"
         headers = {
             "Content-Type": "application/json",
@@ -101,10 +106,14 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         }
         body = {"requests": requests_payload}
 
-        backoff = 1.0
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        total_waited = 0.0
+        max_wait_budget = float(settings.EMBED_MAX_WAIT_SECONDS)
+        backoff = 2.0
+
+        async with httpx.AsyncClient(timeout=45.0) as client:
             for attempt in range(max_retries + 1):
                 try:
+                    await embedding_pacer.pace()
                     response = await client.post(url, headers=headers, json=body)
                     if response.status_code == 200:
                         data = response.json()
@@ -127,64 +136,90 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
                         )
 
                     if response.status_code in (429, 500, 502, 503, 504):
-                        retry_after_hdr = response.headers.get("Retry-After")
-                        if retry_after_hdr:
-                            try:
-                                retry_wait = float(retry_after_hdr)
-                            except ValueError:
-                                retry_wait = backoff
+                        delay = extract_retry_delay(response)
+                        if delay is not None:
+                            retry_wait = delay + random.uniform(0.5, 2.0)
                         else:
-                            retry_wait = backoff
+                            retry_wait = backoff + random.uniform(0.5, 1.5)
+                            backoff = min(backoff * 2.0, 60.0)
+
+                        if total_waited + retry_wait > max_wait_budget:
+                            raise GeminiRateLimitBudgetExceeded(
+                                f"Gemini embedding API rate limit wait budget ({max_wait_budget}s) exceeded "
+                                f"after waiting {total_waited:.1f}s (HTTP {response.status_code}).",
+                                total_waited=total_waited,
+                            )
 
                         if attempt < max_retries:
                             logger.warning(
                                 f"Gemini embedding API rate limit/error {response.status_code}, "
-                                f"retrying in {retry_wait:.1f}s"
+                                f"waiting {retry_wait:.1f}s (budget used: {total_waited:.1f}/{max_wait_budget}s)"
                             )
                             await asyncio.sleep(retry_wait)
-                            backoff *= 2.0
+                            total_waited += retry_wait
                             continue
+
                         raise EmbeddingError(
-                            f"Gemini embedding API failed with HTTP {response.status_code} after retries."
+                            f"Gemini embedding API failed with HTTP {response.status_code} after {max_retries} retries."
                         )
 
                     # Non-retryable error (e.g. 400) - do NOT leak API key in error
                     raise EmbeddingError(f"Gemini embedding API error HTTP {response.status_code}: {response.text}")
                 except httpx.RequestError as exc:
+                    retry_wait = backoff + random.uniform(0.5, 1.5)
+                    backoff = min(backoff * 2.0, 60.0)
+                    if total_waited + retry_wait > max_wait_budget:
+                        raise GeminiRateLimitBudgetExceeded(
+                            f"Gemini network error wait budget ({max_wait_budget}s) exceeded: {type(exc).__name__}",
+                            total_waited=total_waited,
+                        ) from exc
                     if attempt < max_retries:
-                        logger.warning(f"Network error calling Gemini embedding API, retrying in {backoff:.1f}s")
-                        await asyncio.sleep(backoff)
-                        backoff *= 2.0
+                        logger.warning(
+                            f"Network error calling Gemini embedding API ({type(exc).__name__}), retrying in {retry_wait:.1f}s"
+                        )
+                        await asyncio.sleep(retry_wait)
+                        total_waited += retry_wait
                         continue
                     raise EmbeddingError(f"Network error calling Gemini embedding API: {type(exc).__name__}") from exc
 
         raise EmbeddingError("Exhausted retries calling Gemini embedding API.")
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Embed document texts in batches with RETRIEVAL_DOCUMENT and bounded concurrency."""
+        """Embed document texts in batches with RETRIEVAL_DOCUMENT, size limits, and rate-limit pacing."""
         if not texts:
             return []
 
-        batches = [texts[i : i + self.batch_size] for i in range(0, len(texts), self.batch_size)]
-        semaphore = asyncio.Semaphore(5)
+        batches: list[list[str]] = []
+        current_batch: list[str] = []
+        current_chars = 0
+        max_chars = settings.EMBED_MAX_CHARS_PER_REQUEST
 
-        async def _embed_batch(b: list[str]) -> list[list[float]]:
-            async with semaphore:
-                payload = [
-                    {
-                        "model": self.model,
-                        "content": {"parts": [{"text": t}]},
-                        "taskType": "RETRIEVAL_DOCUMENT",
-                        "outputDimensionality": self.dimension,
-                    }
-                    for t in b
-                ]
-                return await self._post_batch(payload)
+        for t in texts:
+            t_len = len(t)
+            if current_batch and (len(current_batch) >= self.batch_size or (current_chars + t_len > max_chars)):
+                batches.append(current_batch)
+                current_batch = [t]
+                current_chars = t_len
+            else:
+                current_batch.append(t)
+                current_chars += t_len
+        if current_batch:
+            batches.append(current_batch)
 
-        batch_results = await asyncio.gather(*[_embed_batch(b) for b in batches])
         all_embeddings: list[list[float]] = []
-        for r in batch_results:
-            all_embeddings.extend(r)
+        for b in batches:
+            payload = [
+                {
+                    "model": self.model,
+                    "content": {"parts": [{"text": t}]},
+                    "taskType": "RETRIEVAL_DOCUMENT",
+                    "outputDimensionality": self.dimension,
+                }
+                for t in b
+            ]
+            batch_result = await self._post_batch(payload)
+            all_embeddings.extend(batch_result)
+
         return all_embeddings
 
 
