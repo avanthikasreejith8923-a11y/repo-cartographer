@@ -19,6 +19,7 @@ if not settings.DEMO_MODE:
         echo=False,
         future=True,
         pool_pre_ping=True,
+        pool_recycle=300,
         pool_size=10,
         max_overflow=20,
         connect_args=settings.asyncpg_connect_args,
