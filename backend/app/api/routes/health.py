@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import logger
 from app.db.session import get_db, get_redis
+from app.services.queue import worker_alive
 
 router = APIRouter()
 
@@ -22,7 +23,8 @@ async def health_check(
 ) -> dict[str, Any]:
     """Check connectivity to PostgreSQL and Redis.
 
-    Returns HTTP 200 when all dependencies are healthy, or HTTP 503 if any service is unreachable.
+    Returns HTTP 200 when all core dependencies are healthy, or HTTP 503 if any core service is unreachable.
+    Reports ARQ worker status as 'alive' or 'not running' without failing the endpoint.
     """
     db_status = "disconnected"
     redis_status = "disconnected"
@@ -46,6 +48,15 @@ async def health_check(
         logger.error(f"Health check Redis error: {exc}")
         is_healthy = False
 
+    # 3. Check ARQ Background Worker (informational only; does not mark service unhealthy)
+    worker_status = "not running"
+    if redis_status == "connected":
+        try:
+            if await worker_alive(redis):
+                worker_status = "alive"
+        except Exception as exc:
+            logger.error(f"Health check Worker error: {exc}")
+
     overall_status = "healthy" if is_healthy else "degraded"
     if not is_healthy:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
@@ -54,6 +65,8 @@ async def health_check(
         "status": overall_status,
         "database": db_status,
         "redis": redis_status,
+        "worker": worker_status,
         "timestamp": datetime.now(UTC).isoformat(),
-        "phase": "Phase 1: Foundation + GitHub OAuth",
+        "phase": "v1.0",
     }
+

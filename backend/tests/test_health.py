@@ -15,7 +15,38 @@ async def test_health_check_healthy(client: httpx.AsyncClient) -> None:
     assert data["status"] == "healthy"
     assert data["database"] == "connected"
     assert data["redis"] == "connected"
+    assert data["worker"] == "not running"
     assert "timestamp" in data
+
+
+@pytest.mark.asyncio
+async def test_health_check_worker_alive(
+    client: httpx.AsyncClient,
+    fake_redis: AsyncMock,
+) -> None:
+    """Validate /health reports worker 'alive' and returns 200 when worker health key is present."""
+    fake_redis.get.return_value = b"health_info: jobs_complete=0"
+
+    response = await client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["worker"] == "alive"
+
+
+@pytest.mark.asyncio
+async def test_health_check_worker_off_still_returns_200(
+    client: httpx.AsyncClient,
+    fake_redis: AsyncMock,
+) -> None:
+    """Validate /health returns 200 even when worker is off (worker key is absent)."""
+    fake_redis.get.return_value = None
+
+    response = await client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["worker"] == "not running"
 
 
 @pytest.mark.asyncio
@@ -31,3 +62,4 @@ async def test_health_check_redis_failure(
     data = response.json()
     assert data["status"] == "degraded"
     assert data["redis"] == "disconnected"
+
