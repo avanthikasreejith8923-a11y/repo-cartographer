@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     REDIS_PORT: int = 6379
     REDIS_URL: str = "redis://redis:6379/0"
     ARQ_POLL_DELAY: float = 5.0  # seconds between queue polls to conserve hosted Redis commands
+    ARQ_HEALTH_CHECK_KEY: str = "arq:health-check"
+    ARQ_HEALTH_CHECK_INTERVAL: int = 15  # seconds
+    JOB_EXPIRY_TIMEOUT_SECONDS: int = 120  # 2 minutes default; can be overridden in tests via env
 
     # GitHub OAuth
     GITHUB_CLIENT_ID: str = ""
@@ -70,10 +73,13 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     EMBEDDING_MODEL: str = "gemini-embedding-001"
     EMBEDDING_DIM: int = 768
-    EMBED_BATCH_SIZE: int = 32
+    EMBED_BATCH_SIZE: int = 16
+    EMBED_MAX_WAIT_SECONDS: int = 600
+    EMBED_REQUESTS_PER_MINUTE: int = 30
+    EMBED_MAX_CHARS_PER_REQUEST: int = 10000
     INDEX_MAX_FILES: int = 1500
     INDEX_MAX_FILE_BYTES: int = 200000
-    INDEX_MAX_CHUNKS: int = 4000
+    INDEX_MAX_CHUNKS: int = 1500
     INDEX_MAX_REPO_DOWNLOAD_MB: int = 100
 
     # Phase 4: Codebase Q&A (RAG) & Architecture Documentation
@@ -87,6 +93,15 @@ class Settings(BaseSettings):
     QA_RATE_LIMIT_PER_MINUTE: int = 10
     DOC_MAX_CONTEXT_CHARS: int = 40000
     DOC_MAX_OUTPUT_TOKENS: int = 4096
+
+    # Phase 5: PR Analysis, Issue Classification & Test Generation
+    PR_ANALYSIS_MAX_FILES: int = 30
+    PR_ANALYSIS_MAX_PATCH_CHARS: int = 20000
+    PR_LARGE_DIFF_LINES: int = 500
+    ISSUE_ANALYSIS_MAX_ISSUES: int = 100
+    ISSUE_CLASSIFY_BATCH_SIZE: int = 10
+    DUPLICATE_SIMILARITY_THRESHOLD: float = 0.85
+    TESTGEN_MAX_SOURCE_CHARS: int = 16000
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
@@ -193,6 +208,37 @@ class Settings(BaseSettings):
     def sync_database_url(self) -> str:
         """Return synchronous database URL for Alembic migrations."""
         return self.normalize_sync_dsn(self.DATABASE_URL) or self.DATABASE_URL
+
+    @property
+    def sanitized_db_target(self) -> str:
+        """Extract database host, port, and db name from DATABASE_URL without credentials."""
+        if not self.DATABASE_URL:
+            return "not-configured"
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(self.DATABASE_URL)
+            host = parsed.hostname or "unknown"
+            port = parsed.port or 5432
+            db_name = parsed.path.lstrip("/") or "unknown"
+            return f"{host}:{port}/{db_name}"
+        except Exception:
+            return "unknown-db"
+
+    @property
+    def sanitized_redis_target(self) -> str:
+        """Extract redis host and port from REDIS_URL without credentials."""
+        if not self.REDIS_URL:
+            return "not-configured"
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(self.REDIS_URL)
+            host = parsed.hostname or "unknown"
+            port = parsed.port or 6379
+            return f"{host}:{port}"
+        except Exception:
+            return "unknown-redis"
 
     def validate_test_database_url(self) -> str:
         """Validate TEST_DATABASE_URL for isolated testing.
