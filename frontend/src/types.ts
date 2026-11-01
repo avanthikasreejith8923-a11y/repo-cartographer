@@ -13,6 +13,7 @@ export interface HealthStatus {
   status: string;
   database: string;
   redis: string;
+  worker?: "alive" | "not running" | string;
   timestamp: string;
   phase: string;
 }
@@ -190,5 +191,74 @@ export interface DocResponse {
   created_at: string | null;
   updated_at: string | null;
 }
+
+export interface PRAnalysis {
+  id: string;
+  repo_id: string;
+  pr_number: number;
+  risk_level: "low" | "medium" | "high";
+  risk_score: number;
+  risk_reasons: string[];
+  summary_markdown: string | null;
+  files_analyzed: number;
+  truncated: boolean;
+  status: "ok" | "error";
+  error: string | null;
+  model: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface IssueAnalysis {
+  issue_number: number;
+  issue_type: "bug" | "feature" | "question" | "documentation" | "chore" | "unclassified";
+  confidence: number;
+  reason: string | null;
+  embedding_model: string | null;
+  analyzed_at: string | null;
+}
+
+export interface DuplicateIssuePair {
+  issue_a: number;
+  title_a: string;
+  issue_b: number;
+  title_b: string;
+  similarity: number;
+  link_a: string;
+  link_b: string;
+}
+
+export interface AnalysisJob {
+  id: string;
+  repo_id: string;
+  kind: string;
+  status: "pending" | "running" | "ready" | "failed";
+  stage: string;
+  progress: number;
+  error: string | null;
+  stats?: Record<string, any>;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface GeneratedTest {
+  id: string;
+  repo_id: string;
+  user_id: string;
+  path: string;
+  framework: string;
+  content: string;
+  syntax_valid: boolean | null;
+  notes: string | null;
+  model: string;
+  indexed_commit_sha: string | null;
+  created_at: string | null;
+}
+
+export interface RepoFileListResponse {
+  files: string[];
+  total: number;
+}
+
 
 
