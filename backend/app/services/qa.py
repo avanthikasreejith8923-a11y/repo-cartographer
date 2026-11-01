@@ -221,7 +221,7 @@ async def ask_codebase(
             detail="Repository not found",
         )
 
-    if repo.index_status != "ready":
+    if repo.index_status != "ready" and (repo.chunk_count or 0) == 0:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Repository codebase has not been indexed yet. Please trigger indexing before asking questions.",
