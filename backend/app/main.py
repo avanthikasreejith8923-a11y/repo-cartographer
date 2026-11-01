@@ -24,8 +24,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("=" * 70)
     else:
         logger.info(f"Starting repo-cartographer backend [Environment: {settings.ENVIRONMENT}]")
-        logger.info(f"Database target: {settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}")
-        logger.info(f"Redis target: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
+        logger.info(f"Database target: {settings.sanitized_db_target}")
+        logger.info(f"Redis target: {settings.sanitized_redis_target}")
         await verify_db_connection()
     yield
     logger.info("Shutting down repo-cartographer backend services...")
@@ -58,8 +58,8 @@ def create_application() -> FastAPI:
     async def root_status() -> JSONResponse:
         return JSONResponse({
             "service": "repo-cartographer-api",
-            "version": "0.1.0",
-            "phase": "Phase 1: Foundation + GitHub OAuth",
+            "version": "1.0.0",
+            "phase": "v1.0",
             "docs": "/docs" if settings.DEBUG else "disabled",
             "status": "online",
         })
