@@ -21,10 +21,14 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
+    from app.models.analysis_job import AnalysisJob
     from app.models.code_chunk import CodeChunk
     from app.models.commit import Commit
+    from app.models.generated_test import GeneratedTest
     from app.models.index_job import IndexJob
     from app.models.issue import Issue
+    from app.models.issue_analysis import IssueAnalysis
+    from app.models.pr_analysis import PRAnalysis
     from app.models.pull_request import PullRequest
     from app.models.qa_history import QAHistory
     from app.models.repo_doc import RepoDoc
@@ -171,6 +175,40 @@ class Repository(Base, TimestampMixin):
         back_populates="repository",
         cascade="all, delete-orphan",
     )
+    pr_analyses: Mapped[list["PRAnalysis"]] = relationship(
+        "PRAnalysis",
+        back_populates="repository",
+        cascade="all, delete-orphan",
+        order_by="desc(PRAnalysis.created_at)",
+    )
+    issue_analyses: Mapped[list["IssueAnalysis"]] = relationship(
+        "IssueAnalysis",
+        back_populates="repository",
+        cascade="all, delete-orphan",
+        order_by="desc(IssueAnalysis.analyzed_at)",
+    )
+    generated_tests: Mapped[list["GeneratedTest"]] = relationship(
+        "GeneratedTest",
+        back_populates="repository",
+        cascade="all, delete-orphan",
+        order_by="desc(GeneratedTest.created_at)",
+    )
+    analysis_jobs: Mapped[list["AnalysisJob"]] = relationship(
+        "AnalysisJob",
+        back_populates="repository",
+        cascade="all, delete-orphan",
+        order_by="desc(AnalysisJob.created_at)",
+    )
+
+    @property
+    def owner(self) -> str:
+        """Extract repository owner login from full_name."""
+        return self.full_name.split("/")[0] if "/" in self.full_name else ""
+
+    @property
+    def name(self) -> str:
+        """Extract repository short name from full_name."""
+        return self.full_name.split("/")[1] if "/" in self.full_name else self.full_name
 
     def __init__(self, **kw: Any) -> None:
         kw.setdefault("index_status", "none")

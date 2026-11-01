@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
+    from app.models.generated_test import GeneratedTest
     from app.models.qa_history import QAHistory
     from app.models.repository import Repository
 
@@ -65,6 +66,12 @@ class User(Base, TimestampMixin):
         back_populates="user",
         cascade="all, delete-orphan",
         order_by="desc(QAHistory.created_at)",
+    )
+    generated_tests: Mapped[list["GeneratedTest"]] = relationship(
+        "GeneratedTest",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        order_by="desc(GeneratedTest.created_at)",
     )
 
     def __repr__(self) -> str:
