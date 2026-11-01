@@ -63,19 +63,26 @@ class GitHubClient:
         self.rate_limit_remaining: int | None = None
         self.rate_limit_reset: int | None = None
         self.rate_limit_limit: int | None = None
+        self._unauthenticated_fallback: bool = False
 
     def _get_auth_headers(self) -> dict[str, str]:
         """Decrypt token at call-time and return authorization headers.
 
         The plaintext token is never persisted on self or logged.
         """
-        token = decrypt_token(self._encrypted_token)
-        return {
+        headers = {
             "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token}",
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "repo-cartographer",
         }
+        if not getattr(self, "_unauthenticated_fallback", False):
+            try:
+                token = decrypt_token(self._encrypted_token)
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+            except Exception:
+                pass
+        return headers
 
     def _update_rate_limits(self, response: httpx.Response) -> None:
         """Update tracked rate limit attributes from response headers."""
@@ -152,6 +159,15 @@ class GitHubClient:
                     )
 
                 self._update_rate_limits(response)
+
+                # Fallback to unauthenticated request on 401 (e.g. invalid/expired token for public repos)
+                if response.status_code == 401 and "Authorization" in headers:
+                    logger.warning(
+                        "GitHub token rejected, using unauthenticated access (public repos only, 60 requests/hour)"
+                    )
+                    self._unauthenticated_fallback = True
+                    headers.pop("Authorization", None)
+                    continue
 
                 # Check primary rate limit exhaustion
                 if response.status_code == 403 and self.rate_limit_remaining == 0:
@@ -321,6 +337,24 @@ class GitHubClient:
         """Fetch single pull request details including additions, deletions, and changed_files."""
         response = await self._request("GET", f"/repos/{owner}/{repo}/pulls/{number}")
         return response.json()
+
+    async def list_pull_request_files(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        max_items: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch files changed in a pull request.
+
+        Items contain filename, status, additions, deletions, and patch (if available).
+        """
+        params = {"per_page": 100}
+        return await self.paginate(
+            f"/repos/{owner}/{repo}/pulls/{number}/files",
+            params=params,
+            max_items=max_items,
+        )
 
     async def list_issues(
         self,
