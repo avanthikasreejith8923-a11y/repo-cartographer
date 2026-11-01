@@ -12,10 +12,14 @@ import pytest_asyncio
 
 from app.db.session import get_db, get_redis
 from app.main import app
+from app.models.analysis_job import AnalysisJob
 from app.models.code_chunk import CodeChunk
 from app.models.commit import Commit
+from app.models.generated_test import GeneratedTest
 from app.models.index_job import IndexJob
 from app.models.issue import Issue
+from app.models.issue_analysis import IssueAnalysis
+from app.models.pr_analysis import PRAnalysis
 from app.models.pull_request import PullRequest
 from app.models.qa_history import QAHistory
 from app.models.repo_doc import RepoDoc
@@ -74,6 +78,10 @@ class InMemoryAsyncSession:
         self.issues_by_id: dict[uuid.UUID, Issue] = {}
         self.qa_history_by_id: dict[uuid.UUID, QAHistory] = {}
         self.repo_docs_by_id: dict[uuid.UUID, RepoDoc] = {}
+        self.pr_analyses_by_id: dict[uuid.UUID, PRAnalysis] = {}
+        self.issue_analyses_by_id: dict[uuid.UUID, IssueAnalysis] = {}
+        self.generated_tests_by_id: dict[uuid.UUID, GeneratedTest] = {}
+        self.analysis_jobs_by_id: dict[uuid.UUID, AnalysisJob] = {}
         self.added: list[Any] = []
         self.deleted: list[Any] = []
 
@@ -247,6 +255,16 @@ class InMemoryAsyncSession:
                 j for j in self.sync_jobs_by_id.values()
                 if repo_id is None or j.repo_id == repo_id
             ]
+            if "status" in stmt_str.lower():
+                status_vals = []
+                for k, v in params.items():
+                    if "status" in k.lower():
+                        if isinstance(v, (list, tuple, set)):
+                            status_vals.extend(v)
+                        elif isinstance(v, str):
+                            status_vals.append(v)
+                if status_vals:
+                    matched_jobs = [j for j in matched_jobs if j.status in status_vals]
             # Order by created_at desc
             matched_jobs.sort(key=lambda j: j.created_at, reverse=True)
             return FakeScalarResult(matched_jobs[0] if matched_jobs else None, items=matched_jobs)
@@ -258,19 +276,32 @@ class InMemoryAsyncSession:
                 j for j in self.index_jobs_by_id.values()
                 if repo_id is None or j.repo_id == repo_id
             ]
+            if "status" in stmt_str.lower():
+                status_vals = []
+                for k, v in params.items():
+                    if "status" in k.lower():
+                        if isinstance(v, (list, tuple, set)):
+                            status_vals.extend(v)
+                        elif isinstance(v, str):
+                            status_vals.append(v)
+                if status_vals:
+                    matched_jobs = [j for j in matched_jobs if j.status in status_vals]
             matched_jobs.sort(key=lambda j: j.created_at, reverse=True)
             return FakeScalarResult(matched_jobs[0] if matched_jobs else None, items=matched_jobs)
 
         # CodeChunks queries
         if "code_chunks" in stmt_str:
             repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID)), None)
+            path_param = next((v for k, v in params.items() if "path" in k and isinstance(v, str)), None)
             matched_chunks = [
                 c for c in self.code_chunks_by_id.values()
-                if repo_id is None or c.repo_id == repo_id
+                if (repo_id is None or c.repo_id == repo_id)
+                and (path_param is None or c.path == path_param)
             ]
             # If query is checking count
             if "count(" in stmt_str.lower():
                 return FakeScalarResult(len(matched_chunks))
+            matched_chunks.sort(key=lambda c: getattr(c, "chunk_index", 0))
             return FakeScalarResult(matched_chunks[0] if matched_chunks else None, items=matched_chunks)
 
         # Commits queries
@@ -326,11 +357,18 @@ class InMemoryAsyncSession:
         # RepoFiles queries
         if "repo_files" in stmt_str:
             repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID)), None)
+            path_param = next((v for k, v in params.items() if "path" in k and isinstance(v, str) and not v.startswith("%")), None)
             matched_files = [
                 f for f in self.repo_files_by_id.values()
-                if repo_id is None or f.repo_id == repo_id
+                if (repo_id is None or f.repo_id == repo_id)
+                and (path_param is None or f.path == path_param)
             ]
-            if "repo_files.path" in stmt_str:
+            for v in params.values():
+                if isinstance(v, str) and v.startswith("%") and v.endswith("%"):
+                    sub = v.strip("%").lower()
+                    matched_files = [f for f in matched_files if sub in f.path.lower()]
+            matched_files.sort(key=lambda f: f.path)
+            if stmt_str.startswith("SELECT repo_files.path ") or "SELECT repo_files.path FROM" in stmt_str or "SELECT repo_files.path\nFROM" in stmt_str:
                 paths = [f.path for f in matched_files]
                 return FakeScalarResult(paths[0] if paths else None, items=paths)
             return FakeScalarResult(matched_files[0] if matched_files else None, items=matched_files)
@@ -360,6 +398,58 @@ class InMemoryAsyncSession:
             ]
             doc = matched_docs[0] if matched_docs else None
             return FakeScalarResult(doc, items=matched_docs)
+
+        # PRAnalysis queries
+        if "pr_analyses" in stmt_str:
+            repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID) and v in self.repos_by_id), None)
+            pr_number = next((v for k, v in params.items() if ("pr_number" in k or "number" in k) and isinstance(v, int)), None)
+            matched_prs = [
+                a for a in self.pr_analyses_by_id.values()
+                if (repo_id is None or a.repo_id == repo_id)
+                and (pr_number is None or a.pr_number == pr_number)
+            ]
+            matched_prs.sort(key=lambda x: getattr(x, "created_at", datetime.min), reverse=True)
+            return FakeScalarResult(matched_prs[0] if matched_prs else None, items=matched_prs)
+
+        # IssueAnalysis queries
+        if "issue_analyses" in stmt_str:
+            repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID) and v in self.repos_by_id), None)
+            issue_num = next((v for k, v in params.items() if ("issue_number" in k or "number" in k) and isinstance(v, int)), None)
+            issue_type = next((v for k, v in params.items() if ("issue_type" in k or "type" in k) and isinstance(v, str)), None)
+            matched_ias = [
+                ia for ia in self.issue_analyses_by_id.values()
+                if (repo_id is None or ia.repo_id == repo_id)
+                and (issue_num is None or ia.issue_number == issue_num)
+                and (issue_type is None or ia.issue_type == issue_type)
+            ]
+            matched_ias.sort(key=lambda x: getattr(x, "analyzed_at", datetime.min) or datetime.min, reverse=True)
+            return FakeScalarResult(matched_ias[0] if matched_ias else None, items=matched_ias)
+
+        # GeneratedTest queries
+        if "generated_tests" in stmt_str:
+            repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID) and v in self.repos_by_id), None)
+            test_id = next((v for v in params.values() if isinstance(v, uuid.UUID) and v in self.generated_tests_by_id), None)
+            path_val = next((v for v in params.values() if isinstance(v, str) and "/" in v), None)
+            matched_tests = [
+                t for t in self.generated_tests_by_id.values()
+                if (repo_id is None or t.repo_id == repo_id)
+                and (test_id is None or t.id == test_id)
+                and (path_val is None or t.path == path_val)
+            ]
+            matched_tests.sort(key=lambda x: getattr(x, "created_at", datetime.min), reverse=True)
+            return FakeScalarResult(matched_tests[0] if matched_tests else None, items=matched_tests)
+
+        # AnalysisJob queries
+        if "analysis_jobs" in stmt_str:
+            repo_id = next((v for v in params.values() if isinstance(v, uuid.UUID) and v in self.repos_by_id), None)
+            kind = next((v for v in params.values() if isinstance(v, str) and v in ("issues", "pulls", "tests")), None)
+            matched_jobs = [
+                j for j in self.analysis_jobs_by_id.values()
+                if (repo_id is None or j.repo_id == repo_id)
+                and (kind is None or j.kind == kind)
+            ]
+            matched_jobs.sort(key=lambda x: getattr(x, "started_at", datetime.min) or datetime.min, reverse=True)
+            return FakeScalarResult(matched_jobs[0] if matched_jobs else None, items=matched_jobs)
 
         # User model queries
         where_part = stmt_str.split("WHERE", 1)[1] if "WHERE" in stmt_str else stmt_str
@@ -471,6 +561,32 @@ class InMemoryAsyncSession:
             if not instance.updated_at:
                 instance.updated_at = now
             self.repo_docs_by_id[instance.id] = instance
+        elif isinstance(instance, PRAnalysis):
+            if not instance.id:
+                instance.id = uuid.uuid4()
+            if not getattr(instance, "created_at", None):
+                instance.created_at = now
+            if not getattr(instance, "updated_at", None):
+                instance.updated_at = now
+            self.pr_analyses_by_id[instance.id] = instance
+        elif isinstance(instance, IssueAnalysis):
+            if not instance.id:
+                instance.id = uuid.uuid4()
+            if not getattr(instance, "analyzed_at", None):
+                instance.analyzed_at = now
+            self.issue_analyses_by_id[instance.id] = instance
+        elif isinstance(instance, GeneratedTest):
+            if not instance.id:
+                instance.id = uuid.uuid4()
+            if not getattr(instance, "created_at", None):
+                instance.created_at = now
+            self.generated_tests_by_id[instance.id] = instance
+        elif isinstance(instance, AnalysisJob):
+            if not instance.id:
+                instance.id = uuid.uuid4()
+            if not getattr(instance, "created_at", None):
+                instance.created_at = now
+            self.analysis_jobs_by_id[instance.id] = instance
 
         self.added.append(instance)
 
@@ -483,6 +599,8 @@ class InMemoryAsyncSession:
             del self.qa_history_by_id[instance.id]
         elif isinstance(instance, RepoDoc) and instance.id in self.repo_docs_by_id:
             del self.repo_docs_by_id[instance.id]
+        elif isinstance(instance, GeneratedTest) and instance.id in self.generated_tests_by_id:
+            del self.generated_tests_by_id[instance.id]
         self.deleted.append(instance)
 
     async def refresh(self, instance: Any) -> None:
@@ -512,7 +630,9 @@ def fake_redis() -> AsyncMock:
     """Fixture providing mock Redis client."""
     mock = AsyncMock()
     mock.ping.return_value = True
+    mock.get.return_value = None
     return mock
+
 
 
 @pytest_asyncio.fixture

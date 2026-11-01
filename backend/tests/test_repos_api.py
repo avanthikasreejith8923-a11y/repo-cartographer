@@ -314,6 +314,11 @@ async def test_trigger_sync_and_get_sync_status(
     assert sync_data["progress"] == 0
     assert repo.status == "pending"
 
+    # 1b. Duplicate sync while already pending returns 409 Conflict
+    resp_sync_conflict = await client.post(f"/repos/{repo.id}/sync", cookies=cookies)
+    assert resp_sync_conflict.status_code == 409
+    assert resp_sync_conflict.json()["detail"] == "Repository synchronization is already pending or running"
+
     # 2. Get sync status
     resp_status = await client.get(f"/repos/{repo.id}/sync-status", cookies=cookies)
     assert resp_status.status_code == 200
@@ -325,6 +330,48 @@ async def test_trigger_sync_and_get_sync_status(
     _, other_cookies = create_authenticated_user(fake_db)
     resp_unauth = await client.get(f"/repos/{repo.id}/sync-status", cookies=other_cookies)
     assert resp_unauth.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_trigger_sync_and_index_already_active_returns_409(
+    client: httpx.AsyncClient,
+    fake_db: InMemoryAsyncSession,
+):
+    """POST /repos/{id}/sync and POST /repos/{id}/index return 409 if a job is already running or pending."""
+    from app.models.index_job import IndexJob
+
+    user, cookies = create_authenticated_user(fake_db)
+
+    repo = Repository(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        github_id=9988,
+        full_name="testuser/active-job-repo",
+        status="syncing",
+        index_status="ready",
+    )
+    fake_db.add(repo)
+
+    # If repo status was syncing but there is NO active job, POST /sync is accepted (resets/reconciles)
+    res_sync_accepted = await client.post(f"/repos/{repo.id}/sync", cookies=cookies)
+    assert res_sync_accepted.status_code == 202
+
+    # Now that an active SyncJob is running, a second POST /sync returns 409 Conflict
+    res_sync_409 = await client.post(f"/repos/{repo.id}/sync", cookies=cookies)
+    assert res_sync_409.status_code == 409
+
+    # Add an active running IndexJob -> POST /index returns 409 even if repo.index_status is ready
+    active_idx_job = IndexJob(
+        id=uuid.uuid4(),
+        repo_id=repo.id,
+        status="running",
+        stage="chunking",
+        progress=50,
+    )
+    fake_db.add(active_idx_job)
+
+    res_idx_409 = await client.post(f"/repos/{repo.id}/index", cookies=cookies)
+    assert res_idx_409.status_code == 409
 
 
 @pytest.mark.asyncio
