@@ -5,20 +5,33 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from redis import asyncio as aioredis
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.db.session import get_db, get_redis
+from app.models.analysis_job import AnalysisJob
 from app.models.commit import Commit
+from app.models.generated_test import GeneratedTest
 from app.models.index_job import IndexJob
 from app.models.issue import Issue
+from app.models.issue_analysis import IssueAnalysis
+from app.models.pr_analysis import PRAnalysis
 from app.models.pull_request import PullRequest
 from app.models.qa_history import QAHistory
 from app.models.repo_doc import RepoDoc
+from app.models.repo_file import RepoFile
 from app.models.repository import Repository
 from app.models.sync_job import SyncJob
 from app.models.user import User
+from app.schemas.intelligence import (
+    AnalysisJobResponse,
+    DuplicateIssuePair,
+    GeneratedTestResponse,
+    GenerateTestRequest,
+    IssueAnalysisResponse,
+    PRAnalysisResponse,
+)
 from app.schemas.repository import (
     AskQuestionRequest,
     AskQuestionResponse,
@@ -38,9 +51,22 @@ from app.schemas.repository import (
     SyncJobResponse,
 )
 from app.services.github_client import GitHubAPIError, GitHubClient
+from app.services.issue_analysis import find_duplicate_issues
+from app.services.pr_analysis import analyze_pull_request
 from app.services.qa import ask_codebase
-from app.services.queue import enqueue_doc_job, enqueue_index_job, enqueue_sync_job
+from app.services.queue import (
+    check_and_expire_stuck_doc_job,
+    check_and_expire_stuck_index_job,
+    check_and_expire_stuck_issue_job,
+    check_and_expire_stuck_sync_job,
+    enqueue_doc_job,
+    enqueue_index_job,
+    enqueue_issue_analysis_job,
+    enqueue_sync_job,
+    reconcile_repository_status,
+)
 from app.services.search import execute_code_search
+from app.services.test_generation import generate_test_for_file
 
 router = APIRouter()
 
@@ -286,6 +312,7 @@ async def import_repository(
 async def list_repositories(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
 ) -> list[RepoResponse]:
     """Retrieve all repositories belonging to the authenticated user."""
     stmt = (
@@ -295,6 +322,18 @@ async def list_repositories(
     )
     result = await db.execute(stmt)
     repos = result.scalars().all()
+    reconciled_any = False
+    for r in repos:
+        changed = await reconcile_repository_status(r, db, redis)
+        if changed:
+            reconciled_any = True
+    if reconciled_any:
+        fresh_res = await db.execute(stmt)
+        repos = fresh_res.scalars().all()
+    else:
+        for r in repos:
+            if hasattr(db, "refresh"):
+                await db.refresh(r)
     return [RepoResponse.model_validate(r) for r in repos]
 
 
@@ -307,6 +346,7 @@ async def get_repository(
     repo_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
 ) -> RepoResponse:
     """Retrieve a single repository. Enforces user ownership; returns 404 if not found or unauthorized."""
     stmt = select(Repository).where(
@@ -320,7 +360,11 @@ async def get_repository(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Repository not found",
         )
+    await reconcile_repository_status(repo, db, redis)
+    if hasattr(db, "refresh"):
+        await db.refresh(repo)
     return RepoResponse.model_validate(repo)
+
 
 
 @router.delete(
@@ -361,6 +405,7 @@ async def trigger_sync(
     repo_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
 ) -> SyncJobResponse:
     """Trigger background re-sync for a repository owned by the authenticated user."""
     stmt = select(Repository).where(
@@ -375,17 +420,49 @@ async def trigger_sync(
             detail="Repository not found",
         )
 
+    # Check if a sync job is already active (pending or running, not expired)
+    active_job_stmt = (
+        select(SyncJob)
+        .where(
+            SyncJob.repo_id == repo.id,
+            SyncJob.status.in_(["pending", "running"]),
+        )
+        .order_by(SyncJob.created_at.desc())
+    )
+    active_job_res = await db.execute(active_job_stmt)
+    active_job = active_job_res.scalars().first()
+    if active_job is not None:
+        was_expired = await check_and_expire_stuck_sync_job(active_job, repo, db, redis)
+        if was_expired:
+            active_job = None
+
+    if active_job is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Repository synchronization is already pending or running",
+        )
+
+    now = datetime.now(UTC)
     repo.status = "pending"
     repo.sync_error = None
+    if hasattr(repo, "updated_at"):
+        repo.updated_at = now
 
     sync_job = SyncJob(
         repo_id=repo.id,
         status="pending",
         stage="queued",
         progress=0,
+        started_at=now,
     )
+    if hasattr(sync_job, "updated_at"):
+        sync_job.updated_at = now
+
     db.add(sync_job)
+    db.add(repo)
     await db.commit()
+    await db.refresh(sync_job)
+    await db.refresh(repo)
 
     await enqueue_sync_job(repo.id)
     return SyncJobResponse.model_validate(sync_job)
@@ -400,6 +477,7 @@ async def get_sync_status(
     repo_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
 ) -> SyncJobResponse:
     """Retrieve the latest sync job status. Returns 404 if repository or sync job is not found."""
     repo_stmt = select(Repository).where(
@@ -427,7 +505,14 @@ async def get_sync_status(
             detail="No sync job found for repository",
         )
 
+    await check_and_expire_stuck_sync_job(sync_job, repo, db, redis)
+    await reconcile_repository_status(repo, db, redis)
+    if hasattr(db, "refresh"):
+        await db.refresh(sync_job)
+        await db.refresh(repo)
+
     return SyncJobResponse.model_validate(sync_job)
+
 
 
 @router.get(
@@ -563,6 +648,7 @@ async def trigger_repo_indexing(
     repo_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
 ) -> IndexJobResponse:
     """Enqueues a background indexing task for the specified repository."""
     repo_stmt = select(Repository).where(
@@ -577,12 +663,28 @@ async def trigger_repo_indexing(
             detail="Repository not found",
         )
 
-    if repo.index_status == "indexing":
+    active_index_job_stmt = (
+        select(IndexJob)
+        .where(
+            IndexJob.repo_id == repo.id,
+            IndexJob.status.in_(["pending", "running"]),
+        )
+        .order_by(IndexJob.created_at.desc())
+    )
+    active_index_job_res = await db.execute(active_index_job_stmt)
+    active_index_job = active_index_job_res.scalars().first()
+    if active_index_job is not None:
+        was_expired = await check_and_expire_stuck_index_job(active_index_job, repo, db, redis)
+        if was_expired:
+            active_index_job = None
+
+    if active_index_job is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Repository is currently being indexed",
         )
 
+    now = datetime.now(UTC)
     job = IndexJob(
         id=uuid.uuid4(),
         repo_id=repo.id,
@@ -590,13 +692,19 @@ async def trigger_repo_indexing(
         stage="queued",
         progress=0,
         stats={},
-        started_at=datetime.now(UTC),
+        started_at=now,
     )
+    if hasattr(job, "updated_at"):
+        job.updated_at = now
     repo.index_status = "indexing"
+    if hasattr(repo, "updated_at"):
+        repo.updated_at = now
+
     db.add(job)
     db.add(repo)
     await db.commit()
     await db.refresh(job)
+    await db.refresh(repo)
 
     await enqueue_index_job(repo.id, job.id)
     return IndexJobResponse.model_validate(job)
@@ -611,6 +719,7 @@ async def get_repo_indexing_status(
     repo_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
 ) -> IndexJobResponse:
     """Returns the latest indexing job status for the specified repository."""
     repo_stmt = select(Repository).where(
@@ -638,7 +747,14 @@ async def get_repo_indexing_status(
             detail="No indexing job found for repository",
         )
 
+    await check_and_expire_stuck_index_job(index_job, repo, db, redis)
+    await reconcile_repository_status(repo, db, redis)
+    if hasattr(db, "refresh"):
+        await db.refresh(index_job)
+        await db.refresh(repo)
+
     return IndexJobResponse.model_validate(index_job)
+
 
 
 @router.post(
@@ -665,7 +781,7 @@ async def search_repo_codebase(
             detail="Repository not found",
         )
 
-    if repo.index_status != "ready":
+    if repo.index_status != "ready" and (repo.chunk_count or 0) == 0:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Repository codebase has not been indexed yet. Please trigger indexing before searching.",
@@ -721,7 +837,7 @@ async def ask_repo_question(
             detail="Repository not found",
         )
 
-    if repo.index_status != "ready":
+    if repo.index_status != "ready" and (repo.chunk_count or 0) == 0:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Repository codebase has not been indexed yet. Please trigger indexing before asking questions.",
@@ -848,6 +964,7 @@ async def generate_repo_doc(
     doc_type: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
 ) -> DocResponse:
     """Queue background documentation generation job for Architecture or README."""
     norm_doc_type = doc_type.lower().strip()
@@ -869,7 +986,7 @@ async def generate_repo_doc(
             detail="Repository not found",
         )
 
-    if repo.index_status != "ready":
+    if repo.index_status != "ready" and (repo.chunk_count or 0) == 0:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Repository codebase has not been indexed yet. Please trigger indexing before generating documentation.",
@@ -882,11 +999,13 @@ async def generate_repo_doc(
     doc_res = await db.execute(doc_stmt)
     doc = doc_res.scalar_one_or_none()
 
-    if doc and doc.status == "generating":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Documentation generation is already in progress.",
-        )
+    if doc and doc.status in ("pending", "generating"):
+        was_expired = await check_and_expire_stuck_doc_job(doc, db, redis)
+        if not was_expired and doc.status in ("pending", "generating"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Documentation generation is already in progress.",
+            )
 
     now = datetime.now(UTC)
     if not doc:
@@ -926,6 +1045,7 @@ async def get_repo_doc(
     doc_type: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
 ) -> DocResponse:
     """Retrieve the generated Architecture or README documentation."""
     norm_doc_type = doc_type.lower().strip()
@@ -954,6 +1074,12 @@ async def get_repo_doc(
     doc_res = await db.execute(doc_stmt)
     doc = doc_res.scalar_one_or_none()
 
+    if doc and doc.status in ("pending", "generating"):
+        await check_and_expire_stuck_doc_job(doc, db, redis)
+        if hasattr(db, "refresh"):
+            await db.refresh(doc)
+            await db.refresh(repo)
+
     if not doc:
         return DocResponse(
             repo_id=repo.id,
@@ -973,4 +1099,447 @@ async def get_repo_doc(
     doc_resp = DocResponse.model_validate(doc)
     doc_resp.is_stale = is_stale
     return doc_resp
+
+
+@router.post(
+    "/{repo_id}/pulls/{number}/analyze",
+    response_model=PRAnalysisResponse,
+    summary="Analyze pull request and generate summary with risk assessment",
+)
+async def analyze_repo_pull_request(
+    repo_id: uuid.UUID,
+    number: int,
+    refresh: bool = Query(default=False, description="Force re-analysis even if already analyzed"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+) -> PRAnalysisResponse:
+    """Analyze a pull request for risk factors and generate AI review summary."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found.",
+        )
+
+    analysis = await analyze_pull_request(
+        repo=repo,
+        pr_number=number,
+        user=current_user,
+        db=db,
+        redis_client=redis,
+        refresh=refresh,
+    )
+    return PRAnalysisResponse.model_validate(analysis)
+
+
+@router.get(
+    "/{repo_id}/pulls/{number}/analysis",
+    response_model=PRAnalysisResponse,
+    summary="Get analysis for a specific pull request",
+)
+async def get_pull_request_analysis(
+    repo_id: uuid.UUID,
+    number: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> PRAnalysisResponse:
+    """Retrieve existing analysis and risk score for a specific pull request."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found.",
+        )
+
+    stmt = select(PRAnalysis).where(
+        PRAnalysis.repo_id == repo.id,
+        PRAnalysis.pr_number == number,
+    )
+    result = await db.execute(stmt)
+    analysis = result.scalar_one_or_none()
+    if not analysis:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Analysis not found for PR #{number}.",
+        )
+
+    return PRAnalysisResponse.model_validate(analysis)
+
+
+@router.get(
+    "/{repo_id}/pulls/analyses",
+    response_model=list[PRAnalysisResponse],
+    summary="List all pull request analyses for repository",
+)
+async def list_pull_request_analyses(
+    repo_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[PRAnalysisResponse]:
+    """Retrieve all PR analyses for a repository, ordered by newest first."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found.",
+        )
+
+    stmt = (
+        select(PRAnalysis)
+        .where(PRAnalysis.repo_id == repo.id)
+        .order_by(PRAnalysis.created_at.desc())
+    )
+    result = await db.execute(stmt)
+    analyses = result.scalars().all()
+    return [PRAnalysisResponse.model_validate(a) for a in analyses]
+
+
+@router.post(
+    "/{repo_id}/issues/analyze",
+    response_model=AnalysisJobResponse,
+    summary="Trigger asynchronous issue classification and duplicate analysis job",
+)
+async def trigger_issue_analysis(
+    repo_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+) -> AnalysisJobResponse:
+    """Start background classification and embedding for repository issues."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found.",
+        )
+
+    # Check if repo has synced issues
+    count_stmt = select(func.count(Issue.id)).where(Issue.repo_id == repo.id)
+    count_res = await db.execute(count_stmt)
+    issue_count = count_res.scalar() or 0
+    if issue_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Repository has no synced issues to analyze. Please sync repository first.",
+        )
+
+    # Check for already running job
+    job_stmt = (
+        select(AnalysisJob)
+        .where(AnalysisJob.repo_id == repo.id, AnalysisJob.kind == "issues")
+        .order_by(AnalysisJob.created_at.desc())
+    )
+    job_res = await db.execute(job_stmt)
+    existing_job = job_res.scalars().first()
+
+    if existing_job:
+        await check_and_expire_stuck_issue_job(existing_job, db, redis)
+        if existing_job.status in ("pending", "running"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Issue analysis job is already running.",
+            )
+
+    now = datetime.now(UTC)
+    new_job = AnalysisJob(
+        repo_id=repo.id,
+        kind="issues",
+        status="pending",
+        stage="queued",
+        progress=0,
+        started_at=now,
+    )
+    db.add(new_job)
+    await db.commit()
+    await db.refresh(new_job)
+
+    await enqueue_issue_analysis_job(repo.id)
+    return AnalysisJobResponse.model_validate(new_job)
+
+
+@router.get(
+    "/{repo_id}/issues/analysis-status",
+    response_model=AnalysisJobResponse,
+    summary="Get status of issue analysis job",
+)
+async def get_issue_analysis_status(
+    repo_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+) -> AnalysisJobResponse:
+    """Retrieve current progress and state of issue classification job."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found.",
+        )
+
+    job_stmt = (
+        select(AnalysisJob)
+        .where(AnalysisJob.repo_id == repo.id, AnalysisJob.kind == "issues")
+        .order_by(AnalysisJob.created_at.desc())
+    )
+    job_res = await db.execute(job_stmt)
+    job = job_res.scalars().first()
+
+    if job and job.status in ("pending", "running"):
+        await check_and_expire_stuck_issue_job(job, db, redis)
+        if hasattr(db, "refresh"):
+            await db.refresh(job)
+            await db.refresh(repo)
+
+    if not job:
+        return AnalysisJobResponse(
+            id=uuid.uuid4(),
+            repo_id=repo.id,
+            kind="issues",
+            status="none",
+            stage="none",
+            progress=0,
+            error=None,
+            stats=None,
+            started_at=None,
+            finished_at=None,
+        )
+
+    return AnalysisJobResponse.model_validate(job)
+
+
+@router.get(
+    "/{repo_id}/issues/analysis",
+    response_model=list[IssueAnalysisResponse],
+    summary="List classified issues with pagination and optional type filter",
+)
+async def list_issue_analyses(
+    repo_id: uuid.UUID,
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=100),
+    type: str | None = Query(default=None, description="Filter by issue_type (bug, feature, etc.)"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[IssueAnalysisResponse]:
+    """Retrieve paginated issue classification records."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found.",
+        )
+
+    stmt = select(IssueAnalysis).where(IssueAnalysis.repo_id == repo.id)
+    if type:
+        stmt = stmt.where(IssueAnalysis.issue_type == type.lower().strip())
+
+    offset = (page - 1) * limit
+    stmt = stmt.order_by(IssueAnalysis.analyzed_at.desc()).offset(offset).limit(limit)
+
+    res = await db.execute(stmt)
+    items = res.scalars().all()
+    return [IssueAnalysisResponse.model_validate(item) for item in items]
+
+
+@router.get(
+    "/{repo_id}/issues/duplicates",
+    response_model=list[DuplicateIssuePair],
+    summary="Find duplicate issue pairs using pgvector cosine similarity",
+)
+async def get_duplicate_issues(
+    repo_id: uuid.UUID,
+    threshold: float | None = Query(default=None, ge=0.0, le=1.0),
+    limit: int = Query(default=50, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[DuplicateIssuePair]:
+    """Calculate and return possible duplicate issues based on cosine similarity."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found.",
+        )
+
+    return await find_duplicate_issues(repo, db, threshold=threshold, limit=limit)
+
+
+@router.get(
+    "/{repo_id}/files",
+    response_model=list[str],
+    summary="List indexed repository file paths for file picker",
+)
+async def list_repo_files(
+    repo_id: uuid.UUID,
+    q: str = Query(default="", description="Optional search term to filter file paths"),
+    limit: int = Query(default=100, ge=1, le=500),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[str]:
+    """List indexed file paths from repo_files for the file picker."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found.",
+        )
+
+    stmt = select(RepoFile.path).where(RepoFile.repo_id == repo.id)
+    if q and q.strip():
+        stmt = stmt.where(RepoFile.path.ilike(f"%{q.strip()}%"))
+
+    stmt = stmt.order_by(RepoFile.path.asc()).limit(limit)
+    res = await db.execute(stmt)
+    return list(res.scalars().all())
+
+
+@router.post(
+    "/{repo_id}/tests/generate",
+    response_model=GeneratedTestResponse,
+    summary="Generate unit test draft for a repository source file",
+)
+async def generate_file_tests(
+    repo_id: uuid.UUID,
+    request: GenerateTestRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+) -> GeneratedTestResponse:
+    """Generate unit test draft for a specific indexed source file."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found.",
+        )
+
+    test_record = await generate_test_for_file(
+        repo=repo,
+        user=current_user,
+        path=request.path.strip(),
+        db=db,
+        redis_client=redis,
+    )
+    return GeneratedTestResponse.model_validate(test_record)
+
+
+@router.get(
+    "/{repo_id}/tests",
+    response_model=list[GeneratedTestResponse],
+    summary="List generated test draft history for repository",
+)
+async def list_generated_tests(
+    repo_id: uuid.UUID,
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[GeneratedTestResponse]:
+    """Retrieve history of generated test drafts for repository."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found.",
+        )
+
+    stmt = (
+        select(GeneratedTest)
+        .where(GeneratedTest.repo_id == repo.id)
+        .order_by(GeneratedTest.created_at.desc())
+        .limit(limit)
+    )
+    res = await db.execute(stmt)
+    items = res.scalars().all()
+    return [GeneratedTestResponse.model_validate(item) for item in items]
+
+
+@router.delete(
+    "/{repo_id}/tests/{test_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a generated test draft",
+)
+async def delete_generated_test(
+    repo_id: uuid.UUID,
+    test_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Delete a generated test draft by ID."""
+    repo_stmt = select(Repository).where(
+        Repository.id == repo_id,
+        Repository.user_id == current_user.id,
+    )
+    repo_res = await db.execute(repo_stmt)
+    repo = repo_res.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found.",
+        )
+
+    stmt = select(GeneratedTest).where(
+        GeneratedTest.id == test_id,
+        GeneratedTest.repo_id == repo.id,
+    )
+    res = await db.execute(stmt)
+    test_record = res.scalar_one_or_none()
+    if not test_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Generated test not found.",
+        )
+
+    await db.delete(test_record)
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
