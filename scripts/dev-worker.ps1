@@ -13,4 +13,8 @@ if (-not (Test-Path $VenvPython)) {
 Write-Host "Starting ARQ background worker process (WorkerSettings)..." -ForegroundColor Cyan
 Set-Location (Join-Path $ProjectRoot "backend")
 $env:PYTHONIOENCODING = "utf-8"
-& $VenvPython -m arq app.worker.WorkerSettings
+while ($true) {
+    & $VenvPython -m arq app.worker.WorkerSettings
+    Write-Warning "Worker stopped or connection interrupted. Reconnecting in 2 seconds..."
+    Start-Sleep -Seconds 2
+}
