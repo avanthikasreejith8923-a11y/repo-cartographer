@@ -12,6 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import settings
 from app.core.logging import logger, setup_logging
+from app.services.queue import is_worker_alive, worker_alive
+
+__all__ = ["WorkerSettings", "is_worker_alive", "worker_alive"]
+
 
 
 async def sync_repository(ctx: dict[str, Any], repo_id: str) -> None:
@@ -46,6 +50,101 @@ async def generate_doc(ctx: dict[str, Any], repo_id: str, doc_type: str) -> None
         await execute_doc_generation(repo_id=uuid.UUID(repo_id), doc_type=doc_type, db=db)
 
 
+async def analyze_issues(ctx: dict[str, Any], repo_id: str) -> None:
+    """Entrypoint function for ARQ background issue classification and embedding tasks."""
+    import uuid
+
+    from app.services.issue_analysis import execute_issue_analysis
+
+    logger.info(f"Worker received analyze_issues job for repo {repo_id}")
+    session_factory: async_sessionmaker[AsyncSession] = ctx["session_factory"]
+    async with session_factory() as db:
+        await execute_issue_analysis(repo_id=uuid.UUID(repo_id), db=db)
+
+
+async def _reconcile_interrupted_jobs_on_startup(session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """Mark all running jobs as failed due to worker restart and reconcile repo statuses."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from app.models.analysis_job import AnalysisJob
+    from app.models.index_job import IndexJob
+    from app.models.repo_doc import RepoDoc
+    from app.models.repository import Repository
+    from app.models.sync_job import SyncJob
+    from app.services.queue import reconcile_repository_status
+
+    now = datetime.now(UTC)
+    INTERRUPTED_MSG = "Interrupted by a worker restart"
+
+    try:
+        async with session_factory() as db:
+            repo_ids: set[Any] = set()
+
+            # 1. Sync jobs
+            res = await db.execute(select(SyncJob).where(SyncJob.status == "running"))
+            running_syncs = res.scalars().all()
+            for j in running_syncs:
+                j.status = "failed"
+                j.stage = "failed"
+                j.error = INTERRUPTED_MSG
+                j.finished_at = now
+                if hasattr(j, "updated_at"):
+                    j.updated_at = now
+                repo_ids.add(j.repo_id)
+
+            # 2. Index jobs
+            res = await db.execute(select(IndexJob).where(IndexJob.status == "running"))
+            running_indices = res.scalars().all()
+            for j in running_indices:
+                j.status = "failed"
+                j.stage = "failed"
+                j.error = INTERRUPTED_MSG
+                j.finished_at = now
+                if hasattr(j, "updated_at"):
+                    j.updated_at = now
+                repo_ids.add(j.repo_id)
+
+            # 3. Analysis jobs
+            res = await db.execute(select(AnalysisJob).where(AnalysisJob.status == "running"))
+            running_analyses = res.scalars().all()
+            for j in running_analyses:
+                j.status = "failed"
+                j.stage = "failed"
+                j.error = INTERRUPTED_MSG
+                j.finished_at = now
+                if hasattr(j, "updated_at"):
+                    j.updated_at = now
+                repo_ids.add(j.repo_id)
+
+            # 4. Doc jobs
+            res = await db.execute(select(RepoDoc).where(RepoDoc.status.in_(["pending", "generating"])))
+            running_docs = res.scalars().all()
+            for d in running_docs:
+                d.status = "failed"
+                d.error = INTERRUPTED_MSG
+                if hasattr(d, "updated_at"):
+                    d.updated_at = now
+
+            await db.commit()
+
+            # Reconcile affected repositories
+            for rid in repo_ids:
+                repo = await db.get(Repository, rid)
+                if repo:
+                    await reconcile_repository_status(repo, db)
+
+            if running_syncs or running_indices or running_analyses or running_docs:
+                logger.info(
+                    f"Worker startup: marked interrupted jobs as failed ("
+                    f"{len(running_syncs)} sync, {len(running_indices)} index, "
+                    f"{len(running_analyses)} analysis, {len(running_docs)} doc)"
+                )
+    except Exception as exc:
+        logger.warning(f"Error reconciling interrupted jobs on worker startup: {exc}")
+
+
 async def startup(ctx: dict[str, Any]) -> None:
     """Worker startup hook: initializes async database engine and session maker."""
     setup_logging()
@@ -57,6 +156,10 @@ async def startup(ctx: dict[str, Any]) -> None:
 
     ctx["engine"] = engine
     ctx["session_factory"] = async_session_maker
+
+    # Reconcile interrupted jobs on worker restart
+    await _reconcile_interrupted_jobs_on_startup(async_session_maker)
+
     logger.info("ARQ Worker initialization complete.")
 
 
@@ -69,13 +172,24 @@ async def shutdown(ctx: dict[str, Any]) -> None:
     logger.info("ARQ Worker shutdown complete.")
 
 
+def _build_worker_redis_settings() -> RedisSettings:
+    rs = RedisSettings.from_dsn(settings.REDIS_URL)
+    rs.retry_on_timeout = True
+    rs.conn_retries = 10
+    rs.conn_retry_delay = 1
+    return rs
+
+
 class WorkerSettings:
     """ARQ Worker process settings."""
 
-    functions = [sync_repository, index_repository, generate_doc]
+    functions = [sync_repository, index_repository, generate_doc, analyze_issues]
     on_startup = startup
     on_shutdown = shutdown
-    redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
+    redis_settings = _build_worker_redis_settings()
     poll_delay = settings.ARQ_POLL_DELAY
     max_jobs = 10
     job_timeout = 1800  # 30 minutes max per indexing / sync run
+    health_check_key = settings.ARQ_HEALTH_CHECK_KEY
+    health_check_interval = settings.ARQ_HEALTH_CHECK_INTERVAL
+
