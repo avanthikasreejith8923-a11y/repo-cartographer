@@ -237,7 +237,7 @@ export const AskTab: React.FC<AskTabProps> = ({ repo, onNavigateToIndex }) => {
             </div>
 
             {/* Markdown Answer */}
-            <div style={{ lineHeight: "1.7", color: "var(--text-primary)", fontSize: "0.95rem", marginBottom: "1.5rem" }}>
+            <div className="markdown-body" style={{ lineHeight: "1.7", color: "var(--text-primary)", fontSize: "0.95rem", marginBottom: "1.5rem" }}>
               <ReactMarkdown>{currentResult.answer}</ReactMarkdown>
             </div>
 

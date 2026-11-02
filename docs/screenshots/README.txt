@@ -1,28 +1,24 @@
-SCREENSHOT CAPTURE CHECKLIST FOR REPO-CARTOGRAPHER
-=====================================================
+REPO-CARTOGRAPHER SCREENSHOT ARCHIVE
+====================================
 
-Capture the following 6 screenshots from the web application (http://localhost:5173) and save them to this directory:
+The screenshots captured from the live application (http://localhost:5173) and embedded in the project README.md:
 
-1. dashboard.png
-   - Description: The main repositories dashboard showing connected GitHub account, repository list, sync/index badges, and Quick Action buttons.
+1. login.png
+   - Description: Liquid Glass Authentication Portal featuring GitHub OAuth 2.0 gateway, ambient aurora glow, and security badges.
+   - Route: /login
+
+2. dashboard.png
+   - Description: Tracked Repositories dashboard showing connected user account, repository cards, sync/index badges, and real-time backend service health diagnostics (Neon PostgreSQL + pgvector, Redis Cloud, ARQ Worker).
    - Route: /
 
-2. repo_search.png
-   - Description: Repository view with the "Search" tab selected, showing hybrid search query results with highlighted code snippets and GitHub permalinks.
-   - Route: /repos/:id (Search tab)
+3. import_modal.png
+   - Description: Interactive GitHub Repository Import modal with debounced search, public/private tags, and duplicate cartography guards.
+   - Route: / (Import Modal)
 
-3. ask_answer.png
-   - Description: The "Ask" codebase Q&A tab showing a question asked to Google Gemini, with a grounded response and validated clickable source citations [S1], [S2].
-   - Route: /repos/:id (Ask tab)
+4. repo_detail.png
+   - Description: Repository Detail view with active 8-stage Codebase Indexing progress bar, repository metadata, and action triggers.
+   - Route: /repos/:id
 
-4. architecture_doc.png
-   - Description: The "Documentation" tab showing the generated Architecture overview document with tech stack breakdown, directory summary, and citation badges.
-   - Route: /repos/:id (Docs tab)
-
-5. pr_risk_badge.png
-   - Description: Pull Request view showing automated PR risk assessment (Low / Medium / High / Critical) with risk factor tags, deterministic heuristic checks, and LLM summary.
-   - Route: /repos/:id (PRs tab)
-
-6. tests_tab.png
-   - Description: The "Tests" tab displaying automated unit test generation for a repository source file (pytest/vitest) with syntax validation status.
-   - Route: /repos/:id (Tests tab)
+5. commits_table.png
+   - Description: Git History & Ingested Commits data table featuring monospace SHA badges, author attribution, and live indexing stage indicators.
+   - Route: /repos/:id (Commits tab)

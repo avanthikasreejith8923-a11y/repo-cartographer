@@ -91,8 +91,8 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
       {/* Header with Import Button */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "1rem" }}>
         <div>
-          <h2 style={{ fontSize: "1.3rem", fontWeight: 700 }}>Tracked Repositories</h2>
-          <p style={{ color: "var(--text-secondary)", fontSize: "0.88rem", marginTop: "0.2rem" }}>
+          <h2 style={{ fontSize: "1.35rem", fontWeight: 700, letterSpacing: "-0.02em" }}>Tracked Repositories</h2>
+          <p style={{ color: "var(--text-secondary)", fontSize: "0.9rem", marginTop: "0.25rem" }}>
             Synchronize GitHub commits, pull requests, and issues with local cartography.
           </p>
         </div>
@@ -102,10 +102,8 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
           disabled={hasActiveSync}
           className="btn btn-primary"
           style={{
-            padding: "0.6rem 1.25rem",
-            fontSize: "0.88rem",
-            opacity: hasActiveSync ? 0.6 : 1,
-            cursor: hasActiveSync ? "not-allowed" : "pointer",
+            padding: "0.65rem 1.35rem",
+            fontSize: "0.9rem",
           }}
           title={hasActiveSync ? "Sync in progress. Please wait until sync finishes to import." : undefined}
         >
@@ -115,13 +113,14 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
 
       {error && (
         <div
+          className="glass-card"
           style={{
-            padding: "0.75rem 1rem",
-            background: "var(--danger-bg)",
-            border: "1px solid var(--danger)",
-            borderRadius: "var(--radius-md)",
-            color: "var(--danger)",
-            fontSize: "0.85rem",
+            padding: "0.85rem 1.25rem",
+            background: "var(--status-err-bg)",
+            border: "1px solid var(--status-err-border)",
+            color: "var(--status-err-text)",
+            fontSize: "0.88rem",
+            fontWeight: 500,
           }}
         >
           {error}
@@ -129,43 +128,45 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
       )}
 
       {loading ? (
-        <div style={{ padding: "4rem", textAlign: "center", color: "var(--text-muted)" }}>
-          <div className="spinner" style={{ margin: "0 auto 1rem" }} />
-          Loading tracked repositories...
+        <div style={{ padding: "4rem 2rem", textAlign: "center", color: "var(--text-muted)" }}>
+          <div className="spinner" style={{ margin: "0 auto 1.25rem" }} />
+          <p style={{ fontSize: "0.92rem" }}>Loading tracked repositories...</p>
         </div>
       ) : repos.length === 0 ? (
         <div
           className="glass-card"
           style={{
-            padding: "3.5rem 2rem",
+            padding: "4rem 2rem",
             textAlign: "center",
             display: "flex",
             flexDirection: "column",
             alignItems: "center",
-            gap: "1rem",
+            gap: "1.25rem",
           }}
         >
           <div
             style={{
-              width: "56px",
-              height: "56px",
+              width: "60px",
+              height: "60px",
               borderRadius: "50%",
-              background: "rgba(99, 102, 241, 0.1)",
+              background: "rgba(124, 92, 255, 0.15)",
+              border: "1px solid rgba(124, 92, 255, 0.35)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              color: "var(--accent-primary)",
+              color: "var(--aurora-cyan)",
+              boxShadow: "0 4px 16px rgba(124, 92, 255, 0.25)",
             }}
           >
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z" />
               <path d="M6 6h10" />
               <path d="M6 10h10" />
             </svg>
           </div>
           <div>
-            <h3 style={{ fontSize: "1.1rem", fontWeight: 600 }}>No repositories imported yet</h3>
-            <p style={{ color: "var(--text-secondary)", fontSize: "0.88rem", maxWidth: "420px", margin: "0.4rem auto 0" }}>
+            <h3 style={{ fontSize: "1.2rem", fontWeight: 700, letterSpacing: "-0.02em" }}>No repositories imported yet</h3>
+            <p style={{ color: "var(--text-secondary)", fontSize: "0.92rem", maxWidth: "440px", margin: "0.5rem auto 0", lineHeight: 1.5 }}>
               Import a repository from your GitHub account to begin asynchronous ingestion of commits, pull requests, and issues.
             </p>
           </div>
@@ -173,20 +174,20 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
             onClick={() => setIsModalOpen(true)}
             disabled={hasActiveSync}
             className="btn btn-primary"
-            style={{ marginTop: "0.5rem", opacity: hasActiveSync ? 0.6 : 1 }}
+            style={{ marginTop: "0.5rem" }}
           >
             {hasActiveSync ? "Sync in progress..." : "Import your first repository"}
           </button>
         </div>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: "1.25rem" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: "1.5rem" }}>
           {repos.map((repo) => (
             <div
               key={repo.id}
               onClick={() => onSelectRepo(repo)}
               className="glass-card repo-card"
               style={{
-                padding: "1.5rem",
+                padding: "1.75rem",
                 cursor: "pointer",
                 display: "flex",
                 flexDirection: "column",
@@ -195,12 +196,13 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
               }}
             >
               <div>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem", marginBottom: "0.5rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem", marginBottom: "0.6rem" }}>
                   <h3
                     style={{
-                      fontSize: "1.05rem",
-                      fontWeight: 600,
+                      fontSize: "1.1rem",
+                      fontWeight: 700,
                       color: "var(--text-primary)",
+                      letterSpacing: "-0.02em",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
@@ -208,27 +210,28 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
                   >
                     {repo.full_name}
                   </h3>
-                  <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
+                  <div style={{ display: "flex", gap: "0.45rem", alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
                     {repo.index_status && repo.index_status !== "none" && (
                       <span
                         className={`badge badge-${
                           repo.index_status === "ready"
                             ? "success"
                             : (repo.chunk_count && repo.chunk_count > 0 && repo.index_status === "failed")
-                            ? "warning"
+                            ? "partial"
                             : repo.index_status === "failed"
                             ? "danger"
                             : "warning"
                         }`}
                         style={{ fontSize: "0.72rem", flexShrink: 0 }}
                       >
+                        <span className={`badge-dot ${repo.index_status === "indexing" ? "pulse-dot" : ""}`} />
                         {repo.index_status === "ready"
                           ? "Indexed"
                           : (repo.chunk_count && repo.chunk_count > 0 && repo.index_status === "failed")
-                          ? "Partial Index"
+                          ? "Partial"
                           : repo.index_status === "indexing"
                           ? "Indexing..."
-                          : "Index Failed"}
+                          : "Failed"}
                       </span>
                     )}
                     <span
@@ -254,8 +257,8 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
                 <p
                   style={{
                     color: "var(--text-secondary)",
-                    fontSize: "0.85rem",
-                    lineHeight: 1.4,
+                    fontSize: "0.88rem",
+                    lineHeight: 1.5,
                     height: "2.8rem",
                     overflow: "hidden",
                     display: "-webkit-box",
@@ -266,7 +269,7 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
                   {repo.description || "No description provided."}
                 </p>
                 {repo.status === "failed" && repo.sync_error && (
-                  <p style={{ color: "var(--danger)", fontSize: "0.8rem", marginTop: "0.4rem", lineHeight: 1.3 }}>
+                  <p style={{ color: "var(--status-err-text)", fontSize: "0.82rem", marginTop: "0.5rem", lineHeight: 1.4 }}>
                     ⚠️ {repo.sync_error}
                   </p>
                 )}
@@ -277,21 +280,21 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
                   style={{
                     display: "flex",
                     justifyContent: "space-between",
-                    fontSize: "0.78rem",
+                    fontSize: "0.8rem",
                     color: "var(--text-muted)",
-                    borderTop: "1px solid var(--border-color)",
-                    paddingTop: "0.75rem",
-                    marginBottom: "0.75rem",
+                    borderTop: "1px solid var(--glass-border)",
+                    paddingTop: "0.85rem",
+                    marginBottom: "0.85rem",
                   }}
                 >
-                  <span>Branch: <strong style={{ color: "var(--text-secondary)" }}>{repo.default_branch}</strong></span>
+                  <span>Branch: <strong style={{ color: "var(--text-primary)" }}>{repo.default_branch}</strong></span>
                   {repo.language && (
-                    <span>Language: <strong style={{ color: "var(--text-secondary)" }}>{repo.language}</strong></span>
+                    <span>Language: <strong style={{ color: "var(--text-primary)" }}>{repo.language}</strong></span>
                   )}
                 </div>
 
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontSize: "0.74rem", color: "var(--text-muted)" }}>
+                  <span style={{ fontSize: "0.76rem", color: "var(--text-muted)" }}>
                     {repo.last_synced_at
                       ? `Synced ${new Date(repo.last_synced_at).toLocaleDateString()}`
                       : "Not synced yet"}
@@ -302,7 +305,7 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
                       onClick={(e) => handleResync(e, repo.id)}
                       disabled={repo.status === "syncing" || repo.status === "pending" || resyncingId !== null}
                       className="btn btn-outline"
-                      style={{ padding: "0.3rem 0.65rem", fontSize: "0.75rem" }}
+                      style={{ padding: "0.35rem 0.8rem", fontSize: "0.78rem" }}
                       title="Trigger Re-sync"
                     >
                       {repo.status === "syncing" || repo.status === "pending"
@@ -314,7 +317,8 @@ export const RepoListView: React.FC<RepoListViewProps> = ({ onSelectRepo }) => {
                     <button
                       onClick={(e) => handleDelete(e, repo)}
                       className="btn btn-outline"
-                      style={{ padding: "0.3rem 0.65rem", fontSize: "0.75rem", color: "var(--danger)" }}
+                      aria-label="Remove Repository"
+                      style={{ padding: "0.35rem 0.8rem", fontSize: "0.78rem", color: "var(--status-err-text)" }}
                       title="Remove Repository"
                     >
                       ✕

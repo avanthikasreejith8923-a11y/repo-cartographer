@@ -60,10 +60,10 @@ export const DashboardView: React.FC = () => {
     return null;
   }
 
-  const defaultAvatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(user.login)}&background=6366f1&color=fff`;
+  const defaultAvatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(user.login)}&background=7c5cff&color=fff`;
 
   return (
-    <div style={{ maxWidth: "1180px", margin: "2rem auto", padding: "0 1.5rem", width: "100%", display: "flex", flexDirection: "column", gap: "2rem" }}>
+    <div style={{ maxWidth: "1200px", margin: "2rem auto", padding: "0 1.5rem", width: "100%", display: "flex", flexDirection: "column", gap: "2rem" }}>
       {/* Background Worker Warning Banner */}
       {health && health.worker === "not running" && (
         <div
@@ -71,20 +71,20 @@ export const DashboardView: React.FC = () => {
           className="glass-card"
           style={{
             padding: "1rem 1.5rem",
-            background: "rgba(239, 68, 68, 0.12)",
-            border: "1px solid var(--danger)",
-            borderRadius: "var(--radius-md)",
-            color: "var(--danger)",
+            background: "rgba(244, 63, 94, 0.16)",
+            border: "1px solid rgba(244, 63, 94, 0.45)",
+            color: "#fb7185",
             fontSize: "0.92rem",
             fontWeight: 600,
             display: "flex",
             alignItems: "center",
-            gap: "0.75rem",
+            gap: "0.85rem",
+            boxShadow: "0 8px 30px rgba(244, 63, 94, 0.2)",
           }}
         >
           <svg
-            width="20"
-            height="20"
+            width="22"
+            height="22"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -101,11 +101,11 @@ export const DashboardView: React.FC = () => {
         </div>
       )}
 
-      {/* Top Banner / Welcome */}
+      {/* Top Banner / Welcome Card */}
       <div
         className="glass-card"
         style={{
-          padding: "1.5rem 2rem",
+          padding: "1.75rem 2.25rem",
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
@@ -118,16 +118,16 @@ export const DashboardView: React.FC = () => {
             src={user.avatar_url || defaultAvatar}
             alt={user.login}
             style={{
-              width: "60px",
-              height: "60px",
+              width: "64px",
+              height: "64px",
               borderRadius: "50%",
-              border: "3px solid rgba(99, 102, 241, 0.4)",
-              boxShadow: "var(--shadow-md)",
+              border: "3px solid rgba(124, 92, 255, 0.5)",
+              boxShadow: "0 8px 24px rgba(0, 0, 0, 0.4)",
             }}
           />
           <div>
-            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.2rem" }}>
-              <h1 style={{ fontSize: "1.35rem", fontWeight: 700 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.25rem", flexWrap: "wrap" }}>
+              <h1 style={{ fontSize: "1.45rem", fontWeight: 700, letterSpacing: "-0.02em" }}>
                 {user.name || user.login}
               </h1>
               <span className="badge badge-success">
@@ -135,7 +135,7 @@ export const DashboardView: React.FC = () => {
                 Active Session
               </span>
             </div>
-            <p style={{ color: "var(--text-secondary)", fontSize: "0.88rem" }}>
+            <p style={{ color: "var(--text-secondary)", fontSize: "0.9rem" }}>
               @{user.login} &bull; {user.email || "No public email"}
             </p>
           </div>
@@ -178,31 +178,31 @@ export const DashboardView: React.FC = () => {
           {/* Repository List Section */}
           <RepoListView onSelectRepo={(repo) => setSelectedRepo(repo)} />
 
-          {/* Infrastructure Health Summary (Phase 1 + 2) */}
+          {/* Infrastructure Health Summary */}
           <div className="grid-2" style={{ marginTop: "1rem" }}>
-            <div className="glass-card" style={{ padding: "1.5rem" }}>
-              <h2 style={{ fontSize: "1rem", fontWeight: 600, marginBottom: "1rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" strokeWidth="2">
+            <div className="glass-card" style={{ padding: "1.75rem" }}>
+              <h2 style={{ fontSize: "1.05rem", fontWeight: 600, marginBottom: "1.15rem", display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--aurora-violet)" strokeWidth="2">
                   <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
                   <circle cx="12" cy="7" r="4" />
                 </svg>
                 Identity &amp; Security
               </h2>
-              <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem", fontSize: "0.85rem" }}>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", fontSize: "0.88rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <span style={{ color: "var(--text-muted)" }}>GitHub ID</span>
-                  <span style={{ fontFamily: "var(--font-mono)" }}>{user.github_id}</span>
+                  <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>{user.github_id}</span>
                 </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <span style={{ color: "var(--text-muted)" }}>Token Security</span>
-                  <span style={{ color: "var(--success)" }}>Fernet AES-128-CBC Encrypted</span>
+                  <span style={{ color: "var(--status-ready-text)", fontWeight: 500 }}>Fernet AES-128-CBC Encrypted</span>
                 </div>
               </div>
             </div>
 
-            <div className="glass-card" style={{ padding: "1.5rem" }}>
-              <h2 style={{ fontSize: "1rem", fontWeight: 600, marginBottom: "1rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2">
+            <div className="glass-card" style={{ padding: "1.75rem" }}>
+              <h2 style={{ fontSize: "1.05rem", fontWeight: 600, marginBottom: "1.15rem", display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--status-ready-text)" strokeWidth="2">
                   <rect x="2" y="2" width="20" height="8" rx="2" ry="2" />
                   <rect x="2" y="14" width="20" height="8" rx="2" ry="2" />
                   <line x1="6" y1="6" x2="6.01" y2="6" />
@@ -211,24 +211,24 @@ export const DashboardView: React.FC = () => {
                 Backend Services Health
               </h2>
               {healthLoading ? (
-                <div style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>Checking services...</div>
+                <div style={{ fontSize: "0.88rem", color: "var(--text-muted)" }}>Checking services...</div>
               ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem", fontSize: "0.85rem" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", fontSize: "0.88rem" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <span style={{ color: "var(--text-muted)" }}>PostgreSQL + pgvector</span>
-                    <span style={{ color: health?.database === "connected" ? "var(--success)" : "var(--danger)" }}>
+                    <span style={{ color: health?.database === "connected" ? "var(--status-ready-text)" : "var(--status-err-text)", fontWeight: 500 }}>
                       {health?.database === "connected" ? "Connected" : "Disconnected"}
                     </span>
                   </div>
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <span style={{ color: "var(--text-muted)" }}>Redis / ARQ Worker Queue</span>
-                    <span style={{ color: health?.redis === "connected" ? "var(--success)" : "var(--danger)" }}>
+                    <span style={{ color: health?.redis === "connected" ? "var(--status-ready-text)" : "var(--status-err-text)", fontWeight: 500 }}>
                       {health?.redis === "connected" ? "Connected" : "Disconnected"}
                     </span>
                   </div>
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <span style={{ color: "var(--text-muted)" }}>ARQ Worker Process</span>
-                    <span style={{ color: health?.worker === "alive" ? "var(--success)" : "var(--danger)" }}>
+                    <span style={{ color: health?.worker === "alive" ? "var(--status-ready-text)" : "var(--status-err-text)", fontWeight: 500 }}>
                       {health?.worker === "alive" ? "Alive" : "Not Running"}
                     </span>
                   </div>
@@ -241,4 +241,3 @@ export const DashboardView: React.FC = () => {
     </div>
   );
 };
-

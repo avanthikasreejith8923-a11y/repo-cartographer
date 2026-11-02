@@ -54,7 +54,7 @@ export const RepoDetailView: React.FC<RepoDetailViewProps> = ({
 
   // Search State
   const [searchQuery, setSearchQuery] = useState<string>("");
-  const [searchMode, setSearchMode] = useState<SearchMode>("hybrid");
+  const [searchMode] = useState<SearchMode>("hybrid");
   const [searchResults, setSearchResults] = useState<SearchResultItem[]>([]);
   const [searchLoading, setSearchLoading] = useState<boolean>(false);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -743,13 +743,11 @@ export const RepoDetailView: React.FC<RepoDetailViewProps> = ({
               {syncJob?.progress || 0}%
             </span>
           </div>
-          <div style={{ width: "100%", height: "6px", background: "rgba(255, 255, 255, 0.1)", borderRadius: "var(--radius-full)", overflow: "hidden" }}>
+          <div className="progress-track">
             <div
+              className="progress-fill"
               style={{
                 width: `${syncJob?.progress || 0}%`,
-                height: "100%",
-                background: "var(--accent-gradient)",
-                transition: "width 0.4s ease",
               }}
             />
           </div>
@@ -778,13 +776,11 @@ export const RepoDetailView: React.FC<RepoDetailViewProps> = ({
               {indexJob?.progress || 0}%
             </span>
           </div>
-          <div style={{ width: "100%", height: "6px", background: "rgba(255, 255, 255, 0.1)", borderRadius: "var(--radius-full)", overflow: "hidden" }}>
+          <div className="progress-track">
             <div
+              className="progress-fill"
               style={{
                 width: `${indexJob?.progress || 0}%`,
-                height: "100%",
-                background: "var(--accent-gradient)",
-                transition: "width 0.4s ease",
               }}
             />
           </div>
@@ -1922,64 +1918,6 @@ export const RepoDetailView: React.FC<RepoDetailViewProps> = ({
                   )}
                 </button>
               </div>
-
-              {/* Mode Toggle Pills */}
-              <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap", fontSize: "0.88rem" }}>
-                <span style={{ color: "var(--text-muted)", fontWeight: 500 }}>Search Mode:</span>
-                <div style={{ display: "flex", background: "rgba(255, 255, 255, 0.04)", padding: "0.25rem", borderRadius: "var(--radius-md)", border: "1px solid var(--border-color)", gap: "0.25rem" }}>
-                  <button
-                    type="button"
-                    onClick={() => setSearchMode("hybrid")}
-                    style={{
-                      background: searchMode === "hybrid" ? "var(--accent-primary)" : "transparent",
-                      color: searchMode === "hybrid" ? "#fff" : "var(--text-secondary)",
-                      border: "none",
-                      padding: "0.35rem 0.85rem",
-                      borderRadius: "var(--radius-sm)",
-                      cursor: "pointer",
-                      fontSize: "0.82rem",
-                      fontWeight: 600,
-                      transition: "all var(--transition-fast)",
-                    }}
-                  >
-                    Hybrid (Semantic + Keyword)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSearchMode("semantic")}
-                    style={{
-                      background: searchMode === "semantic" ? "var(--accent-primary)" : "transparent",
-                      color: searchMode === "semantic" ? "#fff" : "var(--text-secondary)",
-                      border: "none",
-                      padding: "0.35rem 0.85rem",
-                      borderRadius: "var(--radius-sm)",
-                      cursor: "pointer",
-                      fontSize: "0.82rem",
-                      fontWeight: 600,
-                      transition: "all var(--transition-fast)",
-                    }}
-                  >
-                    Semantic (Vector Cosine)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSearchMode("keyword")}
-                    style={{
-                      background: searchMode === "keyword" ? "var(--accent-primary)" : "transparent",
-                      color: searchMode === "keyword" ? "#fff" : "var(--text-secondary)",
-                      border: "none",
-                      padding: "0.35rem 0.85rem",
-                      borderRadius: "var(--radius-sm)",
-                      cursor: "pointer",
-                      fontSize: "0.82rem",
-                      fontWeight: 600,
-                      transition: "all var(--transition-fast)",
-                    }}
-                  >
-                    Keyword (Full-Text)
-                  </button>
-                </div>
-              </div>
             </form>
           </div>
 
@@ -2003,7 +1941,7 @@ export const RepoDetailView: React.FC<RepoDetailViewProps> = ({
           {searchLoading && (
             <div className="glass-card" style={{ padding: "3rem", textAlign: "center", color: "var(--text-muted)" }}>
               <div className="spinner" style={{ margin: "0 auto 1rem" }} />
-              Searching codebase across {searchMode} index...
+              Searching codebase...
             </div>
           )}
 
@@ -2014,7 +1952,7 @@ export const RepoDetailView: React.FC<RepoDetailViewProps> = ({
                 No code results found
               </p>
               <p style={{ fontSize: "0.85rem" }}>
-                Try tweaking your search terms, choosing another mode (e.g. Keyword vs Semantic), or re-indexing.
+                Try tweaking your search terms or re-indexing.
               </p>
             </div>
           )}
